@@ -6,6 +6,12 @@ hard-fails just because a data source is unreachable or changed its markup.
 The bundled fallback is NOT guaranteed current - refresh sp500_fallback.csv
 periodically (e.g. from https://github.com/datasets/s-and-p-500-companies)
 if you rely on it for more than short outages.
+
+Tickers are kept in exchange-native form (e.g. "BRK.B", not yfinance's
+"BRK-B") since bot/data_feed.py now sources bars from Alpaca, and Alpaca
+expects the dotted share-class notation - a hyphenated symbol comes back
+as "invalid symbol" and (per Alpaca's batch behavior) fails the whole
+batch it's in, not just that one ticker.
 """
 import csv
 import logging
@@ -23,7 +29,7 @@ def fetch_sp500_tickers() -> list:
     try:
         tables = pd.read_html(WIKI_URL)
         df = tables[0]
-        tickers = sorted(df["Symbol"].astype(str).str.replace(".", "-", regex=False).tolist())
+        tickers = sorted(df["Symbol"].astype(str).tolist())
         if len(tickers) > 400:  # sanity check before trusting it
             _write_fallback(tickers)
             return tickers

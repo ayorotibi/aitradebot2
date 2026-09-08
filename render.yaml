@@ -1,0 +1,67 @@
+# Render Blueprint - defines all three resources this project needs.
+# Deploy: push this repo to GitHub, then in Render choose
+# New -> Blueprint and point it at the repo. Render reads this file and
+# provisions the database, worker, and web service together.
+#
+# See the README's "Deploying to Render" section for the full walkthrough,
+# including which environment variables you still have to fill in by hand
+# (marked sync: false below - Render will prompt for these in the dashboard
+# rather than storing secrets in this file).
+
+databases:
+  - name: aitradingbot-db
+    databaseName: tradingbot
+    plan: 0.1c-256mb   # cheapest paid plan - the free tier expires after 30 days, not viable for a running bot
+
+services:
+  # --- The trading engine. No public URL - it just runs. ---
+  - type: worker
+    name: aitradingbot-bot
+    runtime: docker
+    dockerfilePath: ./bot/Dockerfile
+    dockerContext: .
+    plan: 0.5c-512mb   # workers have no free tier
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: aitradingbot-db
+          property: connectionString
+      - key: ALPACA_PAPER_API_KEY
+        sync: false
+      - key: ALPACA_PAPER_SECRET_KEY
+        sync: false
+      - key: ALPACA_LIVE_API_KEY
+        sync: false
+      - key: ALPACA_LIVE_SECRET_KEY
+        sync: false
+      - key: BOT_ORDER_TAG
+        value: aitradingbot
+      - key: ALLOW_LIVE_TRADING
+        value: "false"
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: MARKET_TIMEZONE
+        value: America/New_York
+
+  # --- The control dashboard. Gets a public URL. ---
+  - type: web
+    name: aitradingbot-dashboard
+    runtime: docker
+    dockerfilePath: ./dashboard/Dockerfile
+    dockerContext: .
+    plan: 0.5c-512mb   # "free" also works (see README) but sleeps after 15 min idle and has no persistent needs here anyway
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: aitradingbot-db
+          property: connectionString
+      - key: DASHBOARD_USERNAME
+        sync: false
+      - key: DASHBOARD_PASSWORD_HASH
+        sync: false
+      - key: DASHBOARD_SECRET_KEY
+        generateValue: true
+      - key: SESSION_TTL_HOURS
+        value: "12"

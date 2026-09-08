@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Trading Bot — Control Dashboard</title>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+
+<div id="login-screen">
+  <form id="login-form" class="login-box">
+    <h1>Trading Bot Dashboard</h1>
+    <input type="text" id="login-username" placeholder="Username" autocomplete="username" required>
+    <input type="password" id="login-password" placeholder="Password" autocomplete="current-password" required>
+    <button type="submit" class="btn">Log in</button>
+    <div id="login-error"></div>
+  </form>
+</div>
+
+<div id="app" hidden>
+  <header class="topbar">
+    <h1>AI Trading Bot</h1>
+    <div class="status-pills" id="status-pills"></div>
+    <button class="btn secondary" style="width:auto" id="logout-btn">Log out</button>
+  </header>
+
+  <nav class="tabs">
+    <button data-tab="activity" class="active">Activity</button>
+    <button data-tab="scans">Scans</button>
+    <button data-tab="rules">Rules</button>
+    <button data-tab="logs">Logs</button>
+  </nav>
+
+  <main>
+    <section id="tab-activity">
+      <div class="panel">
+        <h2>Open Positions</h2>
+        <table><thead><tr><th>Symbol</th><th>Qty</th><th>Avg Price</th><th>Stop</th><th>Target</th><th>Opened</th></tr></thead>
+        <tbody id="positions-body"></tbody></table>
+      </div>
+      <div class="panel">
+        <h2>Recent Trades</h2>
+        <table><thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Price</th><th>Status</th><th>Reason</th></tr></thead>
+        <tbody id="trades-body"></tbody></table>
+      </div>
+    </section>
+
+    <section id="tab-scans" hidden>
+      <div class="panel">
+        <h2>Recent Scan Results</h2>
+        <table><thead><tr><th>Time</th><th>Symbol</th><th>Gap %</th><th>Price</th><th>Volume</th><th>Result</th><th>Notes</th></tr></thead>
+        <tbody id="scans-body"></tbody></table>
+      </div>
+    </section>
+
+    <section id="tab-rules" hidden>
+      <div class="panel">
+        <h2>Master Controls</h2>
+        <div class="rules-grid">
+          <div class="field">
+            <label>Mode</label>
+            <select id="rule-mode" class="btn secondary" style="width:100%">
+              <option value="paper">Paper</option>
+              <option value="live">Live</option>
+            </select>
+          </div>
+          <div class="toggle-row">
+            <label>Kill switch (stop all new trades)</label>
+            <label class="switch"><input type="checkbox" id="rule-kill-switch"><span class="slider"></span></label>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>Schedule</h2>
+        <div class="rules-grid">
+          <div class="field"><label>Premarket scan time</label><input type="time" id="sched-premarket"></div>
+          <div class="field"><label>Trading window start</label><input type="time" id="sched-window-start"></div>
+          <div class="field"><label>Trading window end</label><input type="time" id="sched-window-end"></div>
+          <div class="field"><label>EOD summary time</label><input type="time" id="sched-eod"></div>
+          <div class="field"><label>Cycle interval (minutes)</label><input type="number" id="sched-interval" min="1"></div>
+          <div class="field"><label>Timezone</label><input type="text" id="sched-tz"></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>Gap Momentum Strategy</h2>
+        <div class="toggle-row">
+          <label>Enabled</label>
+          <label class="switch"><input type="checkbox" id="gm-enabled"><span class="slider"></span></label>
+        </div>
+        <div class="rules-grid">
+          <div class="field"><label>Min gap %</label><input type="number" step="0.1" id="gm-min-gap"></div>
+          <div class="field"><label>Max gap %</label><input type="number" step="0.1" id="gm-max-gap"></div>
+          <div class="field"><label>Min price ($)</label><input type="number" step="0.01" id="gm-min-price"></div>
+          <div class="field"><label>Max price ($)</label><input type="number" step="0.01" id="gm-max-price"></div>
+          <div class="field"><label>Min avg volume</label><input type="number" id="gm-min-vol"></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>Breakout Strategy</h2>
+        <div class="toggle-row">
+          <label>Enabled</label>
+          <label class="switch"><input type="checkbox" id="bo-enabled"><span class="slider"></span></label>
+        </div>
+        <div class="rules-grid">
+          <div class="field"><label>Lookback (days)</label><input type="number" id="bo-lookback"></div>
+          <div class="field"><label>Breakout %</label><input type="number" step="0.1" id="bo-pct"></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>Risk</h2>
+        <p class="muted" style="margin-top:-6px">This Alpaca account is shared with another bot. "Capital allocation" caps
+          the total dollars this bot will ever have deployed at once — leave blank to allow the full account equity
+          (not recommended while another strategy trades the same account).</p>
+        <div class="rules-grid">
+          <div class="field"><label>Capital allocation ($, blank = full equity)</label><input type="number" step="1" id="risk-allocation" placeholder="e.g. 10000"></div>
+          <div class="field"><label>Position size (% of allocation)</label><input type="number" step="0.1" id="risk-size"></div>
+          <div class="field"><label>Max open positions</label><input type="number" id="risk-maxpos"></div>
+          <div class="field"><label>Stop loss %</label><input type="number" step="0.1" id="risk-sl"></div>
+          <div class="field"><label>Take profit %</label><input type="number" step="0.1" id="risk-tp"></div>
+          <div class="field"><label>Max daily loss % (auto kill switch)</label><input type="number" step="0.1" id="risk-maxloss"></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>Notifications</h2>
+        <div class="toggle-row"><label>Telegram enabled</label><label class="switch"><input type="checkbox" id="notif-telegram"><span class="slider"></span></label></div>
+        <div class="toggle-row"><label>Notify on trade</label><label class="switch"><input type="checkbox" id="notif-trade"><span class="slider"></span></label></div>
+        <div class="toggle-row"><label>Notify on error</label><label class="switch"><input type="checkbox" id="notif-error"><span class="slider"></span></label></div>
+        <div class="toggle-row"><label>Notify EOD summary</label><label class="switch"><input type="checkbox" id="notif-eod"><span class="slider"></span></label></div>
+      </div>
+
+      <div class="actions-row">
+        <button class="btn" id="save-rules-btn" style="width:auto">Save Rules</button>
+        <button class="btn danger" id="kill-switch-btn" style="width:auto">Toggle Kill Switch</button>
+        <button class="btn secondary" id="live-mode-btn" style="width:auto">Switch to Live Mode</button>
+      </div>
+      <div class="save-msg" id="save-msg"></div>
+    </section>
+
+    <section id="tab-logs" hidden>
+      <div class="panel">
+        <h2>System Log</h2>
+        <div id="logs-body"></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,58 @@
+version: "3.8"
+
+# No IB Gateway service here - Alpaca's API is plain REST/HTTPS, so the bot
+# talks to it directly over the internet.
+#
+# Postgres instead of a shared SQLite file/volume: this mirrors how the
+# project deploys on Render, where the bot (Background Worker) and
+# dashboard (Web Service) are separate services with no shared disk - see
+# render.yaml and the README's "Deploying to Render" section. Running the
+# same architecture locally means what you test here matches what you
+# deploy there.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: botuser
+      POSTGRES_PASSWORD: botpass
+      POSTGRES_DB: tradingbot
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U botuser -d tradingbot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  bot:
+    build:
+      context: .
+      dockerfile: bot/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://botuser:botpass@postgres:5432/tradingbot
+      PGSSLMODE: disable   # local-only Postgres container, not exposed - Render's managed Postgres requires TLS (the default)
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://botuser:botpass@postgres:5432/tradingbot
+      PGSSLMODE: disable
+    ports:
+      - "8080:8080"     # put a reverse proxy with HTTPS in front of this for anything beyond localhost/VPN - see README
+
+volumes:
+  pgdata:

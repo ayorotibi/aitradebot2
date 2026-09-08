@@ -14,20 +14,33 @@ as "invalid symbol" and (per Alpaca's batch behavior) fails the whole
 batch it's in, not just that one ticker.
 """
 import csv
+import io
 import logging
 from pathlib import Path
 
 import pandas as pd
+import requests
 
 logger = logging.getLogger("bot.sp500_universe")
 
 FALLBACK_PATH = Path(__file__).parent / "sp500_fallback.csv"
 WIKI_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+# pandas.read_html(url) fetches via urllib with no custom header, and
+# urllib's default User-Agent ("Python-urllib/x.y") is exactly the kind of
+# string Wikipedia's edge blocks with a 403 - unlike Yahoo's block earlier
+# in this project's history, this isn't an IP-range block, so a normal
+# browser-looking User-Agent is enough to get through.
+REQUEST_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+}
 
 
 def fetch_sp500_tickers() -> list:
     try:
-        tables = pd.read_html(WIKI_URL)
+        resp = requests.get(WIKI_URL, headers=REQUEST_HEADERS, timeout=15)
+        resp.raise_for_status()
+        tables = pd.read_html(io.StringIO(resp.text))
         df = tables[0]
         tickers = sorted(df["Symbol"].astype(str).tolist())
         if len(tickers) > 400:  # sanity check before trusting it

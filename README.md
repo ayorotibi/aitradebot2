@@ -3,8 +3,8 @@
 A standalone, cloud-deployable trading bot built around the strategy
 described in Humbled Trader's "AI Trading Bot with Claude + IBKR" article
 (S&P 500 premarket gap scan → momentum entry → stop-loss/take-profit exit),
-re-architected to run unattended on a VPS with a password-protected web
-dashboard, on the Alpaca account you already have.
+re-architected to run unattended - on Render or a VPS - with a
+password-protected web dashboard, on the Alpaca account you already have.
 
 **Read this whole file before deploying, especially "Sharing one Alpaca
 account with your other bot" and "Safety model."**
@@ -12,16 +12,22 @@ account with your other bot" and "Safety model."**
 ## What's here
 
 ```
-common/       shared config, SQLite access layer, the baseline rule schema
+common/       shared config, Postgres access layer, the baseline rule schema
 bot/          the trading engine: scanner, strategy, risk, executor, scheduler
 dashboard/    FastAPI + vanilla JS web dashboard (activity feed + rule editor)
-docker-compose.yml   wires the bot + dashboard together
+docker-compose.yml   local dev: bot + dashboard + a bundled Postgres
+render.yaml   Render Blueprint: the same two services + a managed Postgres
 .env.example  copy to .env and fill in
 ```
 
 There's no `ib-gateway/` service here on purpose — Alpaca's API is plain
 REST/HTTPS, so there's no headless desktop-app container, no VNC, no 2FA
-login dance to manage. Two services instead of three.
+login dance to manage.
+
+State lives in **Postgres**, not a local file — see "Why Postgres, not
+SQLite" below. The bot and dashboard are two independent processes that
+share nothing except that database, which is exactly what lets them run as
+two separate Render services (see "Deploying to Render").
 
 ## Why Alpaca instead of Interactive Brokers
 
@@ -96,7 +102,7 @@ independent scripts against the same account by hand.
 | Interactive Brokers (TWS/Gateway, Part 2) | Alpaca REST API | No new account registration, no headless-login/2FA container to babysit — see above for the trade-off this introduces |
 | Windows Task Scheduler, 11 jobs | A single time-window loop inside the bot process (`bot/scheduler.py`) | Portable to any Linux host/container; no OS-specific scheduler |
 | Claude Code CLI as the live runtime | Claude Code is a dev tool for *writing* this code (as it was here); the deployed bot is plain Python with no LLM in the hot path | Claude Code is built for interactive development, not for sitting unattended in a cron loop |
-| Local files (`trades.csv`, `open_positions.json`) | SQLite file on a shared Docker volume, read by both bot and dashboard | Gives the dashboard something to query live; upgrade to Postgres if you outgrow single-host |
+| Local files (`trades.csv`, `open_positions.json`) | Postgres, shared by both bot and dashboard over the network | Gives the dashboard something to query live, and lets the two run as independent, separately-deployable services (e.g. on Render) rather than needing a shared disk |
 | Rules in a static `rules.json` you hand-edit | Rules stored in the DB, edited from the dashboard, hot-reloaded every cycle | That's the control panel you asked for |
 
 The underlying strategy logic (S&P 500 universe, gap % filter, position
@@ -134,7 +140,89 @@ accident:
 None of this is a substitute for watching the paper account behave the way
 you expect, for a while, before ever touching the live gate.
 
+## Why Postgres, not SQLite
+
+Earlier versions of this project used a single SQLite file on a shared
+Docker volume, which works fine as long as the bot and dashboard run on
+the same machine. It stops working the moment they're two separate
+services with no shared disk - which is exactly the case on Render: a
+persistent disk there is attachable to only one service, full stop
+("you can't access a service's disk from any other service," per Render's
+own docs). Postgres solves this the way it's meant to be solved - a real
+network-reachable database both services connect to - and it costs
+nothing in code complexity, since `common/db.py` exposes the same
+functions either way. `docker-compose.yml` bundles a local Postgres
+container for VPS/local deployment so the architecture is identical in
+both places; you're not testing against one database engine and deploying
+against another.
+
 ## Deploying
+
+Two paths, pick one. **Render** (below) is a managed platform - no server
+to patch, TLS and process supervision handled for you, deploys on every
+git push, at roughly the same monthly cost as a VPS. The **VPS** path
+gives you a full Linux box if you'd rather have that level of control.
+
+### Deploying to Render
+
+1. **Push this project to a GitHub repo.** It's already a git repository
+   with everything committed (`git log` shows one commit) - you just need
+   to point it at GitHub:
+   ```bash
+   # On github.com: create a new EMPTY repository (no README/.gitignore/license)
+   # then, from this project's folder:
+   git remote add origin https://github.com/<your-username>/<repo-name>.git
+   git push -u origin main
+   ```
+2. **Generate your dashboard password hash now, before you start the
+   Render setup** - you'll need to paste it in during step 4. Run this
+   somewhere you have Python (your own machine is fine - this never
+   leaves it):
+   ```bash
+   python3 -c "import bcrypt; print(bcrypt.hashpw(b'yourpassword', bcrypt.gensalt()).decode())"
+   ```
+   Save that output string; that's `DASHBOARD_PASSWORD_HASH`, not your
+   plain password.
+3. **In Render:** New → Blueprint → connect the GitHub repo you just
+   pushed. Render reads `render.yaml` and shows you three resources it's
+   about to create: a Postgres database (`aitradingbot-db`), a Background
+   Worker (`aitradingbot-bot`), and a Web Service (`aitradingbot-dashboard`).
+4. **Fill in the environment variables Render prompts for** (these are
+   marked `sync: false` in `render.yaml`, meaning Render asks for them
+   rather than storing them in the file):
+   - On the bot worker: `ALPACA_PAPER_API_KEY`, `ALPACA_PAPER_SECRET_KEY`
+     (your dedicated paper account's keys), and `TELEGRAM_BOT_TOKEN`/
+     `TELEGRAM_CHAT_ID` if you want alerts. Leave `ALPACA_LIVE_API_KEY`/
+     `ALPACA_LIVE_SECRET_KEY` blank for now.
+   - On the dashboard: `DASHBOARD_USERNAME` and `DASHBOARD_PASSWORD_HASH`
+     (the hash from step 2, not your plain password).
+   - `DATABASE_URL` on both, and `DASHBOARD_SECRET_KEY`, are filled in
+     automatically - you won't see prompts for those.
+5. **Click Deploy.** Render builds both Docker images and provisions the
+   database. First build typically takes a few minutes; watch each
+   service's Logs tab in the Render dashboard.
+6. **Open the dashboard.** Render gives the web service a URL like
+   `https://aitradingbot-dashboard.onrender.com` (find it on the service's
+   page). Log in, and set a **capital allocation** on the Rules tab before
+   anything else.
+7. **Watch it run.** The worker's Logs tab is your Activity/Scans tab's
+   raw feed in real time - useful for the first few sessions especially.
+8. **Cost check:** as configured, this is a paid deployment (`0.5c-512mb`
+   on both worker and web service, plus the cheapest paid Postgres) since
+   workers have no free tier and free Postgres expires after 30 days -
+   roughly $19-20/mo total. To trim it, you can edit the dashboard
+   service's plan to `free` in `render.yaml` (it'll sleep after 15 min
+   idle and take ~1 min to wake on your next visit - fine for occasional
+   checking, less fine if you want it always instantly responsive).
+9. **Going live later:** add `ALPACA_LIVE_API_KEY`/`ALPACA_LIVE_SECRET_KEY`
+   and set `ALLOW_LIVE_TRADING=true` on the bot worker's environment
+   variables in the Render dashboard, then manually redeploy that service
+   for the change to take effect. Use the dashboard's Live Mode switch
+   deliberately, as described in "Safety model" above.
+10. **Future updates:** `git push` to the branch Render is watching
+    triggers an automatic redeploy of both services.
+
+### Deploying to a VPS
 
 1. **Get a small always-on VPS.** A $5–20/mo box (DigitalOcean, Linode,
    Lightsail, a small EC2 instance) with Docker and Docker Compose
@@ -220,8 +308,10 @@ comfortable with the plain-rules baseline.
 
 ## Known limitations / what I'd tackle next
 
-- Single-host SQLite state (fine for one bot instance; migrate to Postgres
-  for anything more).
+- Single bot instance assumed - `common/db.py` doesn't do anything to
+  coordinate multiple bot processes writing at once (Postgres itself
+  handles the concurrency safely; the application logic doesn't assume
+  more than one bot process exists).
 - No automated tests yet — the logic is straightforward enough to read,
   and this project's own smoke tests exercised the risk/allocation math
   and the conflict-check logic before delivery, but add proper unit tests

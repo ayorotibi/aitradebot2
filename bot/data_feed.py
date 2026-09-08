@@ -1,43 +1,91 @@
 """
-Market data for scanning. This deliberately does NOT depend on TradingView
-Desktop (see the project README for why). yfinance is free, needs no auth,
-and is good enough for the premarket gap scan (previous close vs. latest
-quote across hundreds of tickers) and the breakout strategy's daily bars -
-this mirrors how the original article's "Part 3" premarket analyst pulled
-data. The actual execution price at order time comes from Alpaca directly
-(bot/alpaca_client.py's last_price()), since that's the data your orders
-execute against.
+Market data for scanning. This used to run on yfinance (free, no auth), but
+Yahoo Finance blocks requests from cloud/datacenter IP ranges - including
+Render's - so every yfinance call from a deployed instance came back empty
+(see the JSONDecodeError / 403s in the Render logs if you're wondering why
+this changed). Alpaca already provides authenticated market data via the
+same account used for execution (bot/alpaca_client.py's last_price()), so
+this now pulls daily bars from there instead: no scraping, no IP-blocking
+risk, one fewer dependency.
+
+Free/paper Alpaca accounts only have entitlement to the IEX feed (not SIP),
+so every request below asks for feed=IEX explicitly - leaving it to
+alpaca-py's default risks a 403 on accounts without a SIP subscription.
+
+Either key pair works for market data (it's tied to the account, not to
+paper-vs-live trading permissions), so this reads whichever is configured,
+preferring paper since that's the default mode. If you rotate keys, both
+this module and bot/alpaca_client.py need the same account's keys.
 """
 import logging
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
-import yfinance as yf
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest
+from alpaca.data.enums import DataFeed
+from alpaca.data.timeframe import TimeFrame
+
+from common.config import Config
 
 logger = logging.getLogger("bot.data_feed")
+
+_client = None
+
+
+def _get_client() -> StockHistoricalDataClient:
+    global _client
+    if _client is None:
+        api_key = Config.ALPACA_PAPER_API_KEY or Config.ALPACA_LIVE_API_KEY
+        secret_key = Config.ALPACA_PAPER_SECRET_KEY or Config.ALPACA_LIVE_SECRET_KEY
+        if not api_key or not secret_key:
+            logger.error("No Alpaca API key/secret configured - cannot fetch market data")
+        _client = StockHistoricalDataClient(api_key, secret_key)
+    return _client
+
+
+def _symbol_frame(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    """alpaca-py's BarSet.df is (symbol, timestamp)-MultiIndexed even for a
+    single-symbol request - pull one symbol's rows out as a plain
+    timestamp-indexed frame with yfinance-style capitalized columns."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    if isinstance(df.index, pd.MultiIndex):
+        if symbol not in df.index.get_level_values(0):
+            return pd.DataFrame()
+        sym_df = df.xs(symbol, level=0)
+    else:
+        sym_df = df
+    sym_df = sym_df.rename(columns={
+        "open": "Open", "high": "High", "low": "Low",
+        "close": "Close", "volume": "Volume",
+    })
+    return sym_df.sort_index()
 
 
 def get_gap_candidates(tickers: list, batch_size: int = 100) -> pd.DataFrame:
     """Returns a DataFrame with columns: symbol, prev_close, last_price,
-    gap_pct, volume - one row per ticker that yfinance returned data for."""
+    gap_pct, volume - one row per ticker Alpaca returned at least 2 daily
+    bars for."""
+    client = _get_client()
     rows = []
+    start = datetime.now(timezone.utc) - timedelta(days=10)  # covers weekends/holidays
+
     for i in range(0, len(tickers), batch_size):
         batch = tickers[i:i + batch_size]
         try:
-            data = yf.download(
-                tickers=batch, period="2d", interval="1d",
-                group_by="ticker", progress=False, threads=True,
+            req = StockBarsRequest(
+                symbol_or_symbols=batch, timeframe=TimeFrame.Day,
+                start=start, feed=DataFeed.IEX,
             )
+            data = client.get_stock_bars(req).df
         except Exception as exc:
-            logger.warning("yfinance batch download failed for %s tickers: %s", len(batch), exc)
+            logger.warning("Alpaca batch bar fetch failed for %s tickers: %s", len(batch), exc)
             continue
 
         for symbol in batch:
             try:
-                if len(batch) == 1:
-                    df = data
-                else:
-                    df = data[symbol]
-                df = df.dropna()
+                df = _symbol_frame(data, symbol).dropna()
                 if len(df) < 2:
                     continue
                 prev_close = float(df["Close"].iloc[-2])
@@ -57,9 +105,17 @@ def get_gap_candidates(tickers: list, batch_size: int = 100) -> pd.DataFrame:
 
 
 def get_daily_bars(symbol: str, lookback_days: int = 30) -> pd.DataFrame:
+    client = _get_client()
+    # Calendar-day buffer so lookback_days of *trading* days actually fit
+    # in the window (weekends/holidays), same intent as yfinance's period=.
+    start = datetime.now(timezone.utc) - timedelta(days=lookback_days + 15)
     try:
-        df = yf.download(symbol, period=f"{lookback_days}d", interval="1d", progress=False)
-        return df.dropna()
+        req = StockBarsRequest(
+            symbol_or_symbols=symbol, timeframe=TimeFrame.Day,
+            start=start, feed=DataFeed.IEX,
+        )
+        data = client.get_stock_bars(req).df
+        return _symbol_frame(data, symbol).dropna()
     except Exception as exc:
-        logger.warning("yfinance daily bars failed for %s: %s", symbol, exc)
+        logger.warning("Alpaca daily bars failed for %s: %s", symbol, exc)
         return pd.DataFrame()

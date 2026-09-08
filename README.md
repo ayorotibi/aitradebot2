@@ -98,7 +98,7 @@ independent scripts against the same account by hand.
 
 | Original approach | Here | Why |
 |---|---|---|
-| TradingView Desktop app driven via a remote-debugging port (Part 1) | Dropped entirely. Signals come from yfinance (premarket gap scan + breakout bars) | Automating TradingView's Electron app isn't a supported API and doesn't run headless in the cloud without a fragile virtual display |
+| TradingView Desktop app driven via a remote-debugging port (Part 1) | Dropped entirely. Signals come from Alpaca's market data API (premarket gap scan + breakout bars) | Automating TradingView's Electron app isn't a supported API and doesn't run headless in the cloud without a fragile virtual display |
 | Interactive Brokers (TWS/Gateway, Part 2) | Alpaca REST API | No new account registration, no headless-login/2FA container to babysit — see above for the trade-off this introduces |
 | Windows Task Scheduler, 11 jobs | A single time-window loop inside the bot process (`bot/scheduler.py`) | Portable to any Linux host/container; no OS-specific scheduler |
 | Claude Code CLI as the live runtime | Claude Code is a dev tool for *writing* this code (as it was here); the deployed bot is plain Python with no LLM in the hot path | Claude Code is built for interactive development, not for sitting unattended in a cron loop |
@@ -318,8 +318,11 @@ comfortable with the plain-rules baseline.
   before trusting it further with real money.
 - The breakout strategy is a simple N-day-high check — a starting point,
   not a tuned strategy.
-- yfinance is unauthenticated and can rate-limit under heavy use; the
-  premarket scan batches requests but there's no backoff/retry logic yet.
+- Market data (premarket scan + breakout bars) comes from Alpaca's IEX feed,
+  which is what free/paper accounts are entitled to - it's real-time but
+  single-exchange, so prices can differ slightly from full consolidated-tape
+  (SIP) data. The scanner batches requests but there's no backoff/retry logic
+  yet if Alpaca itself rate-limits.
 - No automated backtesting harness. Test a rule change against historical
   data before trusting it, not just in the dashboard.
 - The symbol-conflict check queries Alpaca once per candidate per cycle;

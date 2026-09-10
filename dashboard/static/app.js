@@ -115,7 +115,13 @@ let currentScans = [];
 let scansSort = { key: "ts", dir: "desc" };
 
 async function refreshScans() {
-  currentScans = await api("/api/scans?limit=150");
+  // scan_results rows are written one per ticker in the S&P 500 list's
+  // sorted (alphabetical) order, so a limit smaller than the universe size
+  // silently drops everything early in the alphabet - not just the ones
+  // that failed the filters, ANY of them, PASSED included. 600 comfortably
+  // covers today's ~503-ticker universe (with room for it to grow) so a
+  // full scan is never partially cut off.
+  currentScans = await api("/api/scans?limit=600");
   renderScans();
 }
 

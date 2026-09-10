@@ -134,13 +134,35 @@ class AlpacaClient:
             symbol=symbol,
             qty=qty,
             side=order_side,
-            time_in_force=TimeInForce.DAY,
+            # GTC, not DAY: for a bracket order, time_in_force governs the
+            # take-profit/stop-loss legs too, not just the entry. DAY legs
+            # get cancelled at market close if unfilled, which silently
+            # strips the position of its stop-loss/take-profit protection
+            # the very first evening it doesn't hit either target - after
+            # that it can only be closed by something noticing and acting,
+            # never on its own. GTC keeps the legs live until one fills.
+            time_in_force=TimeInForce.GTC,
             order_class=OrderClass.BRACKET,
             take_profit=TakeProfitRequest(limit_price=round(take_profit_price, 2)),
             stop_loss=StopLossRequest(stop_price=round(stop_loss_price, 2)),
             client_order_id=client_order_id,
         )
         return self.trading.submit_order(order_request)
+
+    def has_live_protective_orders(self, symbol: str) -> bool:
+        """True if this bot has at least one open (unfilled, uncancelled)
+        order at Alpaca for `symbol` - i.e. a bracket leg still capable of
+        eventually closing the position. Used by reconcile_positions() to
+        flag a position that Alpaca still shows as open but that has
+        nothing left that could ever close it (e.g. DAY-TIF legs that
+        already expired under the old code, before the GTC fix above)."""
+        try:
+            req = GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol], limit=20, nested=True)
+            orders = self.trading.get_orders(req)
+        except Exception as exc:
+            logger.warning("Could not fetch open orders for %s: %s", symbol, exc)
+            return True  # unknown - don't cry wolf on a lookup failure
+        return any((getattr(o, "client_order_id", "") or "").startswith(Config.BOT_ORDER_TAG) for o in orders)
 
     def close_tracked_position(self, symbol: str, qty: float, client_order_id: str):
         """Closes exactly `qty` shares - this bot's own tracked amount from

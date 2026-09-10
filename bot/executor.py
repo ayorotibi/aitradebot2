@@ -129,7 +129,21 @@ def reconcile_positions(alpaca, rules: dict):
     for pos in db.get_open_positions():
         symbol = pos["symbol"]
         if alpaca.broker_position_for_symbol(symbol) is not None:
-            continue  # still open at Alpaca - nothing to reconcile
+            # Still open at Alpaca - nothing to remove from tracking. But if
+            # it has no live order left that could ever close it (e.g. a
+            # DAY-TIF bracket leg that expired unfilled at a prior market
+            # close, before place_bracket_order() was switched to GTC),
+            # it'll sit here indefinitely with zero stop-loss/take-profit
+            # protection and reconciliation alone will never catch that,
+            # since the position never actually closes. Flag it instead.
+            if not alpaca.has_live_protective_orders(symbol):
+                db.log("WARNING", "executor",
+                       f"{symbol} is open but has no live stop-loss/take-profit order at Alpaca - "
+                       f"it is currently UNPROTECTED and will not close on its own. Likely cause: "
+                       f"its bracket order's protective legs expired (previously placed with a "
+                       f"day time-in-force). Needs manual attention in Alpaca, or re-arming new "
+                       f"exit orders, until that's automated.")
+            continue
 
         exit_price = alpaca.last_bracket_exit_price(symbol)
         pnl = None

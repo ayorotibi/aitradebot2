@@ -59,7 +59,7 @@ $$("nav.tabs button").forEach((btn) => {
   btn.addEventListener("click", () => {
     $$("nav.tabs button").forEach((b) => b.classList.remove("active"));
     btn.classList.add("active");
-    ["activity", "scans", "rules", "logs"].forEach((tab) => {
+    ["activity", "scans", "summary", "rules", "logs"].forEach((tab) => {
       $(`#tab-${tab}`).hidden = tab !== btn.dataset.tab;
     });
   });
@@ -111,15 +111,107 @@ async function refreshActivity() {
 
 // --- Scans tab ---
 
+let currentScans = [];
+let scansSort = { key: "ts", dir: "desc" };
+
 async function refreshScans() {
-  const scans = await api("/api/scans?limit=150");
-  $("#scans-body").innerHTML = scans.map(s => `
+  currentScans = await api("/api/scans?limit=150");
+  renderScans();
+}
+
+function renderScans() {
+  const filterVal = $("#scans-filter").value;
+  let rows = currentScans.filter((s) => {
+    if (filterVal === "passed") return !!s.passed;
+    if (filterVal === "filtered") return !s.passed;
+    return true;
+  });
+
+  const { key, dir } = scansSort;
+  const mul = dir === "asc" ? 1 : -1;
+  rows = [...rows].sort((a, b) => {
+    let av = a[key], bv = b[key];
+    if (key === "passed") { av = av ? 1 : 0; bv = bv ? 1 : 0; }
+    if (av == null) return bv == null ? 0 : 1;
+    if (bv == null) return -1;
+    if (typeof av === "string") return av.localeCompare(bv) * mul;
+    return (av - bv) * mul;
+  });
+
+  $("#scans-body").innerHTML = rows.map(s => `
     <tr><td>${fmtTime(s.ts)}</td><td>${s.symbol}</td><td>${s.gap_pct != null ? s.gap_pct.toFixed(2) : "—"}</td>
     <td>${s.price != null ? s.price.toFixed(2) : "—"}</td><td>${s.volume != null ? Math.round(s.volume).toLocaleString() : "—"}</td>
     <td><span class="tag ${s.passed ? "pass" : "fail"}">${s.passed ? "PASSED" : "filtered"}</span></td>
     <td class="muted">${s.notes || ""}</td></tr>
-  `).join("") || `<tr><td colspan="7" class="muted">No scans yet</td></tr>`;
+  `).join("") || `<tr><td colspan="7" class="muted">No scans match this filter</td></tr>`;
+
+  $$('#tab-scans th[data-sort]').forEach((th) => {
+    const active = th.dataset.sort === scansSort.key;
+    th.classList.toggle("sorted-asc", active && scansSort.dir === "asc");
+    th.classList.toggle("sorted-desc", active && scansSort.dir === "desc");
+  });
 }
+
+$("#scans-filter").addEventListener("change", renderScans);
+
+$$('#tab-scans th[data-sort]').forEach((th) => {
+  th.addEventListener("click", () => {
+    const key = th.dataset.sort;
+    if (scansSort.key === key) {
+      scansSort.dir = scansSort.dir === "asc" ? "desc" : "asc";
+    } else {
+      scansSort = { key, dir: key === "ts" ? "desc" : "asc" };
+    }
+    renderScans();
+  });
+});
+
+// --- Summary tab ---
+
+let allTrades = [];
+
+async function refreshSummary() {
+  allTrades = await api("/api/trades?limit=500");
+  renderSummary();
+}
+
+function renderSummary() {
+  const range = $("#summary-range").value;
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const rows = allTrades.filter((t) => range === "all" || (t.ts || "").slice(0, 10) === todayStr);
+
+  const buys = rows.filter((t) => t.side === "BUY");
+  const sells = rows.filter((t) => t.side === "SELL");
+
+  const dollarValue = (t) => (t.price != null ? t.qty * t.price : null);
+  const buyTotal = buys.reduce((sum, t) => sum + (dollarValue(t) || 0), 0);
+  const sellTotal = sells.reduce((sum, t) => sum + (dollarValue(t) || 0), 0);
+  const pnlKnown = sells.filter((t) => t.pnl != null);
+  const pnlTotal = pnlKnown.reduce((sum, t) => sum + t.pnl, 0);
+
+  $("#summary-totals").innerHTML = `
+    <span class="pill">Bought: ${buys.length} trade(s), $${buyTotal.toFixed(2)}</span>
+    <span class="pill">Sold: ${sells.length} trade(s), $${sellTotal.toFixed(2)}</span>
+    <span class="pill ${pnlTotal < 0 ? "bad" : "ok"}">Realized PnL: $${pnlTotal.toFixed(2)}${pnlKnown.length < sells.length ? " (partial - some exits have no recorded fill price)" : ""}</span>
+  `;
+
+  $("#summary-bought-body").innerHTML = buys.map(t => `
+    <tr><td>${fmtTime(t.ts)}</td><td>${t.symbol}</td><td>${t.qty}</td>
+    <td>${t.price != null ? t.price.toFixed(2) : "—"}</td>
+    <td>${dollarValue(t) != null ? dollarValue(t).toFixed(2) : "—"}</td>
+    <td>${t.status || ""}</td></tr>
+  `).join("") || `<tr><td colspan="6" class="muted">No buys in this range</td></tr>`;
+
+  $("#summary-sold-body").innerHTML = sells.map(t => `
+    <tr><td>${fmtTime(t.ts)}</td><td>${t.symbol}</td><td>${t.qty}</td>
+    <td>${t.price != null ? t.price.toFixed(2) : "—"}</td>
+    <td>${dollarValue(t) != null ? dollarValue(t).toFixed(2) : "—"}</td>
+    <td class="${t.pnl > 0 ? "pnl-pos" : (t.pnl < 0 ? "pnl-neg" : "")}">${t.pnl != null ? (t.pnl >= 0 ? "+" : "") + t.pnl.toFixed(2) : "—"}</td>
+    <td>${t.status || ""}</td></tr>
+  `).join("") || `<tr><td colspan="7" class="muted">No sells in this range</td></tr>`;
+}
+
+$("#summary-range").addEventListener("change", renderSummary);
 
 // --- Logs tab ---
 
@@ -262,7 +354,7 @@ function fmtTime(iso) {
 
 async function refreshAll() {
   try {
-    await Promise.all([refreshStatus(), refreshActivity(), refreshScans(), refreshRules(), refreshLogs()]);
+    await Promise.all([refreshStatus(), refreshActivity(), refreshScans(), refreshSummary(), refreshRules(), refreshLogs()]);
   } catch (err) {
     console.error(err);
   }

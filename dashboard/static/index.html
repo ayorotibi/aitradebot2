@@ -28,6 +28,7 @@
   <nav class="tabs">
     <button data-tab="activity" class="active">Activity</button>
     <button data-tab="scans">Scans</button>
+    <button data-tab="summary">Summary</button>
     <button data-tab="rules">Rules</button>
     <button data-tab="logs">Logs</button>
   </nav>
@@ -49,8 +50,42 @@
     <section id="tab-scans" hidden>
       <div class="panel">
         <h2>Recent Scan Results</h2>
-        <table><thead><tr><th>Time</th><th>Symbol</th><th>Gap %</th><th>Price</th><th>Volume</th><th>Result</th><th>Notes</th></tr></thead>
+        <div class="toolbar">
+          <select id="scans-filter" class="btn secondary" style="width:auto">
+            <option value="all">All results</option>
+            <option value="passed">Passed only</option>
+            <option value="filtered">Filtered only</option>
+          </select>
+          <span class="muted" style="font-size:12px">Click a column heading to sort</span>
+        </div>
+        <table><thead><tr>
+          <th data-sort="ts">Time</th><th data-sort="symbol">Symbol</th><th data-sort="gap_pct">Gap %</th>
+          <th data-sort="price">Price</th><th data-sort="volume">Volume</th><th data-sort="passed">Result</th><th>Notes</th>
+        </tr></thead>
         <tbody id="scans-body"></tbody></table>
+      </div>
+    </section>
+
+    <section id="tab-summary" hidden>
+      <div class="panel">
+        <div class="toolbar" style="justify-content: space-between;">
+          <h2 style="margin:0">Trade Summary</h2>
+          <select id="summary-range" class="btn secondary" style="width:auto">
+            <option value="today">Today</option>
+            <option value="all">All time</option>
+          </select>
+        </div>
+        <div class="status-pills" id="summary-totals" style="margin-top:12px"></div>
+      </div>
+      <div class="panel">
+        <h2>Stocks Bought</h2>
+        <table><thead><tr><th>Time</th><th>Symbol</th><th>Qty</th><th>Price</th><th>Total $</th><th>Status</th></tr></thead>
+        <tbody id="summary-bought-body"></tbody></table>
+      </div>
+      <div class="panel">
+        <h2>Stocks Sold</h2>
+        <table><thead><tr><th>Time</th><th>Symbol</th><th>Qty</th><th>Price</th><th>Total $</th><th>Realized PnL</th><th>Status</th></tr></thead>
+        <tbody id="summary-sold-body"></tbody></table>
       </div>
     </section>
 

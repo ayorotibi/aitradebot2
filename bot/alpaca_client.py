@@ -25,7 +25,7 @@ import logging
 
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import (
-    MarketOrderRequest, TakeProfitRequest, StopLossRequest, GetOrdersRequest,
+    MarketOrderRequest, LimitOrderRequest, TakeProfitRequest, StopLossRequest, GetOrdersRequest,
 )
 from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass, QueryOrderStatus
 from alpaca.data.historical import StockHistoricalDataClient
@@ -151,18 +151,49 @@ class AlpacaClient:
 
     def has_live_protective_orders(self, symbol: str) -> bool:
         """True if this bot has at least one open (unfilled, uncancelled)
-        order at Alpaca for `symbol` - i.e. a bracket leg still capable of
-        eventually closing the position. Used by reconcile_positions() to
-        flag a position that Alpaca still shows as open but that has
+        order at Alpaca for `symbol` - i.e. a bracket/OCO leg still capable
+        of eventually closing the position. Used by reconcile_positions()
+        to detect a position Alpaca still shows as open but that has
         nothing left that could ever close it (e.g. DAY-TIF legs that
-        already expired under the old code, before the GTC fix above)."""
+        expired under the old code, before the GTC fix), so it can be
+        re-armed with a fresh exit order. Checks both top-level orders and
+        any nested legs for this bot's tag, since bracket orders come back
+        as a parent with `.legs` while an OCO pair may or may not."""
         try:
             req = GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol], limit=20, nested=True)
             orders = self.trading.get_orders(req)
         except Exception as exc:
             logger.warning("Could not fetch open orders for %s: %s", symbol, exc)
             return True  # unknown - don't cry wolf on a lookup failure
-        return any((getattr(o, "client_order_id", "") or "").startswith(Config.BOT_ORDER_TAG) for o in orders)
+        for o in orders:
+            if (getattr(o, "client_order_id", "") or "").startswith(Config.BOT_ORDER_TAG):
+                return True
+            for leg in (getattr(o, "legs", None) or []):
+                if (getattr(leg, "client_order_id", "") or "").startswith(Config.BOT_ORDER_TAG):
+                    return True
+        return False
+
+    def place_oco_exit_order(self, symbol: str, qty: float, stop_loss_price: float,
+                              take_profit_price: float, client_order_id: str):
+        """Attaches a fresh stop-loss/take-profit pair to a position that is
+        ALREADY open - unlike place_bracket_order(), which opens a brand
+        new position alongside its brackets, this only works on existing
+        shares (Alpaca's OCO - one-cancels-other - order class: a linked
+        limit sell and stop sell, whichever fills first cancels the
+        other). Used by reconcile_positions() to re-arm a position found
+        unprotected. GTC for the same reason place_bracket_order() is:
+        a DAY exit order would just expire again at the next close."""
+        order_request = LimitOrderRequest(
+            symbol=symbol,
+            qty=abs(qty),
+            side=OrderSide.SELL,
+            time_in_force=TimeInForce.GTC,
+            order_class=OrderClass.OCO,
+            take_profit=TakeProfitRequest(limit_price=round(take_profit_price, 2)),
+            stop_loss=StopLossRequest(stop_price=round(stop_loss_price, 2)),
+            client_order_id=client_order_id,
+        )
+        return self.trading.submit_order(order_request)
 
     def close_tracked_position(self, symbol: str, qty: float, client_order_id: str):
         """Closes exactly `qty` shares - this bot's own tracked amount from

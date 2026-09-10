@@ -124,25 +124,22 @@ def reconcile_positions(alpaca, rules: dict):
     agrees. If Alpaca no longer shows an open position, we look up the
     filled price of the bracket leg that closed it, record that as a SELL
     trade (with realized PnL if the fill price could be found), and drop it
-    from our tracked positions so the freed-up slot can be used again."""
+    from our tracked positions so the freed-up slot can be used again.
+
+    If Alpaca still shows it open but with no live order left that could
+    ever close it (e.g. a DAY-TIF bracket leg that expired before
+    place_bracket_order() was switched to GTC), it's re-armed on the spot
+    with a fresh OCO stop-loss/take-profit pair - see _rearm_unprotected()."""
     closed = []
     for pos in db.get_open_positions():
         symbol = pos["symbol"]
         if alpaca.broker_position_for_symbol(symbol) is not None:
-            # Still open at Alpaca - nothing to remove from tracking. But if
-            # it has no live order left that could ever close it (e.g. a
-            # DAY-TIF bracket leg that expired unfilled at a prior market
-            # close, before place_bracket_order() was switched to GTC),
-            # it'll sit here indefinitely with zero stop-loss/take-profit
-            # protection and reconciliation alone will never catch that,
-            # since the position never actually closes. Flag it instead.
+            # Still open at Alpaca - nothing to remove from tracking, but
+            # make sure it still has something that could eventually close
+            # it, since reconciliation only ever notices an ACTUAL closed
+            # position - a position that's open-and-bare never trips that.
             if not alpaca.has_live_protective_orders(symbol):
-                db.log("WARNING", "executor",
-                       f"{symbol} is open but has no live stop-loss/take-profit order at Alpaca - "
-                       f"it is currently UNPROTECTED and will not close on its own. Likely cause: "
-                       f"its bracket order's protective legs expired (previously placed with a "
-                       f"day time-in-force). Needs manual attention in Alpaca, or re-arming new "
-                       f"exit orders, until that's automated.")
+                _rearm_unprotected(alpaca, rules, pos)
             continue
 
         exit_price = alpaca.last_bracket_exit_price(symbol)
@@ -172,6 +169,43 @@ def reconcile_positions(alpaca, rules: dict):
 
         closed.append({"symbol": symbol, "pnl": pnl})
     return closed
+
+
+def _rearm_unprotected(alpaca, rules: dict, pos: dict):
+    """Places a fresh OCO stop-loss/take-profit pair on a position Alpaca
+    still shows as open but that has no live exit order left. Prices are
+    computed from the CURRENT market price, not the original entry price
+    (pos["avg_price"]) - so re-arming is safe to run unattended: neither
+    the new stop nor the new target can be on the wrong side of the live
+    price and fire immediately on submission, which re-arming off the
+    original entry price could do if the price has moved a lot since. This
+    does mean the new protection reflects the rules' stop_loss_pct/
+    take_profit_pct from here, not from the original entry - the realized
+    PnL if it fires is still measured against the real avg_price, only the
+    new order's trigger levels are relative to today's price."""
+    symbol = pos["symbol"]
+    price = alpaca.last_price(symbol)
+    if not price or price <= 0:
+        db.log("WARNING", "executor",
+               f"{symbol} is unprotected but a live price could not be fetched - "
+               f"could not re-arm this cycle, will retry next cycle.")
+        return
+
+    stop_loss, take_profit = risk.stop_and_target_prices(price, "BUY", rules)
+    order_id = _client_order_id(symbol)
+    try:
+        alpaca.place_oco_exit_order(symbol, pos["qty"], stop_loss, take_profit, order_id)
+        db.update_position_stops(symbol, stop_loss, take_profit)
+        db.log("INFO", "executor",
+               f"Re-armed {symbol}: new SL={stop_loss:.2f} TP={take_profit:.2f} around current price "
+               f"~{price:.2f} (client_order_id={order_id}). Position is protected again.")
+        if rules["notifications"]["notify_on_trade"]:
+            notifier.send(f"Re-armed protection for {symbol}: SL {stop_loss:.2f} / TP {take_profit:.2f} "
+                           f"(current price ~{price:.2f})")
+    except Exception as exc:
+        db.log("ERROR", "executor", f"Failed to re-arm protection for {symbol}: {exc}")
+        if rules["notifications"]["notify_on_error"]:
+            notifier.send(f"⚠️ Failed to re-arm protection for {symbol}: {exc}")
 
 
 def flatten_all(alpaca, reason: str):

@@ -247,6 +247,22 @@ def get_open_positions():
             return [dict(r) for r in cur.fetchall()]
 
 
+def update_position_stops(symbol, stop_loss, take_profit):
+    """Updates only the stop_loss/take_profit columns for an already-open
+    position - unlike upsert_position(), this never touches qty/avg_price.
+    Used when re-arming a position whose protective orders had expired: the
+    new OCO exit order's prices need to be reflected in the dashboard's
+    Open Positions view without the qty/avg_price accumulation logic in
+    upsert_position() running (this isn't a new fill, no shares changed
+    hands)."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE positions SET stop_loss = %s, take_profit = %s WHERE symbol = %s",
+                (stop_loss, take_profit, symbol),
+            )
+
+
 # --- Scans ---
 
 def record_scan(symbol, gap_pct, price, volume, passed, notes=""):

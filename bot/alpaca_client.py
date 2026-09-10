@@ -25,12 +25,14 @@ import logging
 
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import (
-    MarketOrderRequest, TakeProfitRequest, StopLossRequest,
+    MarketOrderRequest, TakeProfitRequest, StopLossRequest, GetOrdersRequest,
 )
-from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass
+from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass, QueryOrderStatus
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockLatestTradeRequest
 from alpaca.common.exceptions import APIError
+
+from common.config import Config
 
 logger = logging.getLogger("bot.alpaca_client")
 
@@ -73,6 +75,43 @@ class AlpacaClient:
             return {"symbol": symbol, "qty": float(pos.qty), "avg_entry_price": float(pos.avg_entry_price)}
         except APIError:
             return None  # no open position for this symbol
+
+    def last_bracket_exit_price(self, symbol: str):
+        """Used by reconcile_positions() in bot/executor.py to learn the
+        fill price of whichever bracket leg (stop-loss or take-profit)
+        already closed a position this bot no longer sees as open at
+        Alpaca. Looks at this bot's own recent closed orders for the
+        symbol (tagged with Config.BOT_ORDER_TAG, so the other strategy
+        sharing this account is never touched) and returns the filled
+        price of the most recently filled bracket leg, or None if it
+        can't be determined (e.g. Alpaca hasn't settled the fill yet)."""
+        try:
+            req = GetOrdersRequest(status=QueryOrderStatus.CLOSED, symbols=[symbol], limit=20, nested=True)
+            orders = self.trading.get_orders(req)
+        except Exception as exc:
+            logger.warning("Could not fetch closed orders for %s: %s", symbol, exc)
+            return None
+
+        tagged = [o for o in orders if (getattr(o, "client_order_id", "") or "").startswith(Config.BOT_ORDER_TAG)]
+        tagged.sort(key=lambda o: getattr(o, "submitted_at", None) or "", reverse=True)
+
+        for order in tagged:
+            legs = getattr(order, "legs", None) or []
+            filled_legs = [
+                leg for leg in legs
+                if str(getattr(leg, "status", "")).lower().endswith("filled")
+                and getattr(leg, "filled_avg_price", None)
+            ]
+            filled_legs.sort(key=lambda leg: getattr(leg, "filled_at", None) or "", reverse=True)
+            if filled_legs:
+                return float(filled_legs[0].filled_avg_price)
+            # A plain (non-bracket) SELL this bot submitted directly, e.g. a
+            # manual flatten, also counts as the closing fill.
+            if (str(getattr(order, "side", "")).lower().endswith("sell")
+                    and str(getattr(order, "status", "")).lower().endswith("filled")
+                    and getattr(order, "filled_avg_price", None)):
+                return float(order.filled_avg_price)
+        return None
 
     # --- Market data ---
 

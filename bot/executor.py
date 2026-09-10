@@ -50,6 +50,12 @@ def execute_signal(alpaca, rules: dict, signal: dict):
                f"rules.mode='live' but ALLOW_LIVE_TRADING is not set in the environment - "
                f"{symbol} will be traded on the PAPER account instead. This is an intentional double gate.")
 
+    our_positions = {p["symbol"] for p in db.get_open_positions()}
+    if symbol in our_positions:
+        db.log("INFO", "executor",
+               f"Already holding {symbol} - skipping duplicate BUY signal instead of adding to the position.")
+        return
+
     if _symbol_conflicts_with_other_bot(alpaca, symbol):
         db.log("WARNING", "executor",
                f"{symbol} already has a position in this Alpaca account that this bot didn't open "
@@ -101,6 +107,57 @@ def execute_signal(alpaca, rules: dict, signal: dict):
         db.log("ERROR", "executor", f"Order failed for {symbol}: {exc}")
         if rules["notifications"]["notify_on_error"]:
             notifier.send(f"⚠️ Order failed for {symbol}: {exc}")
+
+
+def reconcile_positions(alpaca, rules: dict):
+    """Runs at the start of every trading cycle, before any new signals are
+    evaluated. This bot's own `positions` table is only ever updated when
+    THIS bot places or flattens an order - but a bracket order's stop-loss
+    or take-profit leg can close a position on its own, straight at Alpaca,
+    with nothing telling this bot about it. Left unreconciled, that symbol
+    stays "open" in our DB forever: it keeps eating one of max_open_positions
+    even though the shares are gone, and the realized gain/loss from that
+    exit never gets recorded anywhere (which is also why daily PnL used to
+    always read $0.00).
+
+    For each symbol we think we hold, this checks whether Alpaca still
+    agrees. If Alpaca no longer shows an open position, we look up the
+    filled price of the bracket leg that closed it, record that as a SELL
+    trade (with realized PnL if the fill price could be found), and drop it
+    from our tracked positions so the freed-up slot can be used again."""
+    closed = []
+    for pos in db.get_open_positions():
+        symbol = pos["symbol"]
+        if alpaca.broker_position_for_symbol(symbol) is not None:
+            continue  # still open at Alpaca - nothing to reconcile
+
+        exit_price = alpaca.last_bracket_exit_price(symbol)
+        pnl = None
+        if exit_price is not None:
+            pnl = round((exit_price - pos["avg_price"]) * pos["qty"], 2)
+
+        db.record_trade(
+            symbol, "SELL", pos["qty"], exit_price, "BRACKET_EXIT", "FILLED",
+            "Position closed by Alpaca (stop-loss or take-profit filled) - detected on reconciliation",
+            pnl=pnl,
+        )
+        db.remove_position(symbol)
+
+        if pnl is not None:
+            db.log("INFO", "executor",
+                   f"Reconciled {symbol}: Alpaca shows this position already closed "
+                   f"(exit ~{exit_price:.2f}, realized PnL ${pnl:+.2f}). Freed up a position slot.")
+            if rules["notifications"]["notify_on_trade"]:
+                notifier.send(f"Position closed: {symbol} exited ~{exit_price:.2f}, realized PnL ${pnl:+.2f} "
+                               f"(stop-loss/take-profit filled at Alpaca)")
+        else:
+            db.log("WARNING", "executor",
+                   f"Reconciled {symbol}: Alpaca shows this position already closed, but the exit "
+                   f"fill price could not be found, so PnL for this trade was not recorded. "
+                   f"Freed up a position slot.")
+
+        closed.append({"symbol": symbol, "pnl": pnl})
+    return closed
 
 
 def flatten_all(alpaca, reason: str):

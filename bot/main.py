@@ -13,7 +13,7 @@ from common.config import Config
 from bot.alpaca_client import AlpacaClient
 from bot.scanner import run_premarket_scan
 from bot.strategy import evaluate_gap_momentum, evaluate_breakout
-from bot.executor import execute_signal
+from bot.executor import execute_signal, reconcile_positions
 from bot import notifier, risk, scheduler
 
 logging.basicConfig(
@@ -55,6 +55,13 @@ def on_trading_cycle(rules: dict):
     if not connected:
         db.log("ERROR", "main", "Could not reach Alpaca this cycle - skipping")
         return
+
+    # Sync our tracked positions against Alpaca's real ones first, every
+    # cycle - a bracket order's stop-loss/take-profit leg can close a
+    # position on its own with nothing else telling this bot about it.
+    # This also runs while the kill switch is on ("still monitoring"),
+    # since it only reflects reality rather than placing any new orders.
+    reconcile_positions(alpaca, rules)
 
     if rules.get("kill_switch"):
         db.log("INFO", "main", "Kill switch engaged - trading cycle skipped (still monitoring)")

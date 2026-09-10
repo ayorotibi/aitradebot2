@@ -209,13 +209,21 @@ def get_today_pnl() -> float:
 # --- Positions ---
 
 def upsert_position(symbol, qty, avg_price, stop_loss=None, take_profit=None):
+    """Opens a new tracked position, or - if one is somehow already open for
+    this symbol (shouldn't happen now that executor.py skips a BUY signal
+    for a symbol it already holds, but kept defensive) - adds to it rather
+    than silently overwriting qty/avg_price and losing track of the earlier
+    shares. stop_loss/take_profit from the newest fill win, since those
+    apply to the most recently submitted bracket order."""
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """INSERT INTO positions (symbol, qty, avg_price, opened_at, stop_loss, take_profit)
                    VALUES (%s, %s, %s, %s, %s, %s)
                    ON CONFLICT (symbol) DO UPDATE SET
-                     qty = EXCLUDED.qty, avg_price = EXCLUDED.avg_price,
+                     qty = positions.qty + EXCLUDED.qty,
+                     avg_price = ((positions.qty * positions.avg_price) + (EXCLUDED.qty * EXCLUDED.avg_price))
+                                 / NULLIF(positions.qty + EXCLUDED.qty, 0),
                      stop_loss = EXCLUDED.stop_loss, take_profit = EXCLUDED.take_profit""",
                 (symbol, qty, avg_price, _now(), stop_loss, take_profit),
             )

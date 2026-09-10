@@ -84,6 +84,11 @@ CREATE TABLE IF NOT EXISTS heartbeat (
     broker_connected INTEGER NOT NULL,
     mode TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS job_runs (
+    job_name TEXT PRIMARY KEY,
+    last_run_date TEXT NOT NULL
+);
 """
 
 _pool = None
@@ -302,3 +307,33 @@ def get_heartbeat():
             cur.execute("SELECT * FROM heartbeat WHERE id = 1")
             row = cur.fetchone()
             return dict(row) if row else None
+
+
+# --- Job run tracking ---
+# Persists which date each one-shot daily job (premarket scan, EOD summary)
+# last ran on. bot/scheduler.py's DailyJobTracker keeps this in memory too
+# (to avoid a DB round trip on every 15s poll) but reads/writes through here
+# so that a Render redeploy - which wipes in-memory state - doesn't make the
+# scheduler think a job hasn't run yet today when it already has. Without
+# this, a redeploy any time after premarket_scan_time re-runs the premarket
+# scan mid-day, overwriting that morning's real candidate list with
+# whatever a same-day-but-hours-later "gap" scan finds (often much smaller
+# gaps than at the open, sometimes none) - which starves the rest of that
+# day's trading cycles of anything to buy.
+
+def get_job_last_run_date(job_name: str):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT last_run_date FROM job_runs WHERE job_name = %s", (job_name,))
+            row = cur.fetchone()
+            return row["last_run_date"] if row else None
+
+
+def set_job_last_run_date(job_name: str, date_str: str):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO job_runs (job_name, last_run_date) VALUES (%s, %s)
+                   ON CONFLICT (job_name) DO UPDATE SET last_run_date = EXCLUDED.last_run_date""",
+                (job_name, date_str),
+            )

@@ -28,16 +28,33 @@ def _parse_hhmm(value: str):
 class DailyJobTracker:
     """Tracks which one-shot jobs (premarket scan, EOD summary) have already
     run today so they fire exactly once even though the loop polls every
-    15 seconds."""
+    15 seconds.
+
+    Backed by common.db (the job_runs table), not just this process's
+    memory: a bare in-memory tracker forgets everything on a redeploy, so a
+    restart any time after premarket_scan_time would make the bot think
+    the premarket scan hadn't run yet today and re-run it - clobbering the
+    morning's real candidate list with a same-day-but-later "gap" scan
+    (usually far fewer or zero real candidates, since intraday moves often
+    fade from their open). The in-memory dict is kept purely so a live,
+    long-running process doesn't hit the database on every 15-second poll
+    once today's run is already recorded."""
 
     def __init__(self):
         self._last_run_date = {}
 
     def should_run_once(self, job_name: str, today: date) -> bool:
-        return self._last_run_date.get(job_name) != today
+        if self._last_run_date.get(job_name) == today:
+            return False
+        persisted = db.get_job_last_run_date(job_name)
+        if persisted == today.isoformat():
+            self._last_run_date[job_name] = today  # warm the cache, skip future DB checks today
+            return False
+        return True
 
     def mark_run(self, job_name: str, today: date):
         self._last_run_date[job_name] = today
+        db.set_job_last_run_date(job_name, today.isoformat())
 
 
 def run_loop(rules_provider, on_premarket_scan, on_trading_cycle, on_eod_summary,

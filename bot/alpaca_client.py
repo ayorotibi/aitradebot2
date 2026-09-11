@@ -69,10 +69,17 @@ class AlpacaClient:
 
     def broker_position_for_symbol(self, symbol: str):
         """Returns the account-wide position for this symbol (which may
-        belong to another bot/strategy sharing this account), or None."""
+        belong to another bot/strategy sharing this account), or None.
+        Includes qty_available - Alpaca's own count of how many of those
+        shares are NOT already claimed by an open order - which
+        has_live_protective_orders() uses as its primary signal."""
         try:
             pos = self.trading.get_open_position(symbol)
-            return {"symbol": symbol, "qty": float(pos.qty), "avg_entry_price": float(pos.avg_entry_price)}
+            qty_available = float(pos.qty_available) if pos.qty_available is not None else None
+            return {
+                "symbol": symbol, "qty": float(pos.qty), "avg_entry_price": float(pos.avg_entry_price),
+                "qty_available": qty_available,
+            }
         except APIError:
             return None  # no open position for this symbol
 
@@ -149,16 +156,35 @@ class AlpacaClient:
         )
         return self.trading.submit_order(order_request)
 
-    def has_live_protective_orders(self, symbol: str) -> bool:
-        """True if this bot has at least one open (unfilled, uncancelled)
-        order at Alpaca for `symbol` - i.e. a bracket/OCO leg still capable
-        of eventually closing the position. Used by reconcile_positions()
-        to detect a position Alpaca still shows as open but that has
-        nothing left that could ever close it (e.g. DAY-TIF legs that
-        expired under the old code, before the GTC fix), so it can be
-        re-armed with a fresh exit order. Checks both top-level orders and
-        any nested legs for this bot's tag, since bracket orders come back
-        as a parent with `.legs` while an OCO pair may or may not."""
+    def has_live_protective_orders(self, symbol: str, broker_pos: dict = None) -> bool:
+        """True if this position still has something at Alpaca that could
+        eventually close it. Used by reconcile_positions() to detect a
+        position Alpaca shows as open but with nothing left protecting it
+        (e.g. DAY-TIF legs that expired under the old code, before the GTC
+        fix), so it can be re-armed with a fresh exit order.
+
+        Primary signal: Alpaca's own qty_available on the position (pass
+        the already-fetched broker_position_for_symbol() dict in as
+        `broker_pos` to avoid a second lookup) - "total shares minus
+        shares already claimed by an open order." If fewer shares are
+        available than the position holds, something already has a live
+        claim on them - almost certainly this bot's own bracket/OCO exit
+        order. This is what actually caught a real bug: a client_order_id
+        tag match (the fallback below, and originally the only check) can
+        miss a live bracket's exit legs once the entry has filled and only
+        the legs remain open, wrongly reporting "unprotected" and
+        attempting a redundant, rejected re-arm on a position that was
+        fine all along.
+
+        Fallback: an open order tagged with this bot's client_order_id
+        prefix, for when qty_available isn't available (e.g. a lookup
+        failure upstream)."""
+        if broker_pos is not None:
+            qty_available = broker_pos.get("qty_available")
+            tracked_qty = broker_pos.get("qty")
+            if qty_available is not None and tracked_qty is not None and qty_available < tracked_qty - 1e-6:
+                return True
+
         try:
             req = GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol], limit=20, nested=True)
             orders = self.trading.get_orders(req)

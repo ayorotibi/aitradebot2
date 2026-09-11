@@ -133,12 +133,13 @@ def reconcile_positions(alpaca, rules: dict):
     closed = []
     for pos in db.get_open_positions():
         symbol = pos["symbol"]
-        if alpaca.broker_position_for_symbol(symbol) is not None:
+        broker_pos = alpaca.broker_position_for_symbol(symbol)
+        if broker_pos is not None:
             # Still open at Alpaca - nothing to remove from tracking, but
             # make sure it still has something that could eventually close
             # it, since reconciliation only ever notices an ACTUAL closed
             # position - a position that's open-and-bare never trips that.
-            if not alpaca.has_live_protective_orders(symbol):
+            if not alpaca.has_live_protective_orders(symbol, broker_pos):
                 _rearm_unprotected(alpaca, rules, pos)
             continue
 

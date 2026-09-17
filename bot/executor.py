@@ -85,6 +85,27 @@ def execute_signal(alpaca, rules: dict, signal: dict):
         db.log("WARNING", "executor", f"Could not get a live price for {symbol} - skipping")
         return
 
+    # The gap_momentum signal was decided against this morning's premarket
+    # scan, but the trading cycle that got us here can run hours later - by
+    # then the "gap" that made this a candidate may have already faded or
+    # fully reversed. Re-check it against the live price we just fetched
+    # (reusing this call rather than an extra one) before committing real
+    # capital. signal["prev_close"] is only set for gap_momentum signals
+    # (see bot/strategy.py) - a breakout signal has no prev_close and skips
+    # this check entirely, since staleness isn't a concern there (it
+    # already re-fetches live daily bars every cycle).
+    prev_close = signal.get("prev_close")
+    if prev_close:
+        strat = rules["strategies"]["gap_momentum"]
+        current_gap_pct = (price - prev_close) / prev_close * 100.0
+        if not (strat["min_gap_pct"] <= current_gap_pct <= strat["max_gap_pct"]):
+            scan_gap_pct = signal.get("scan_gap_pct", current_gap_pct)
+            db.log("INFO", "executor",
+                   f"{symbol} gapped {scan_gap_pct:.2f}% at this morning's scan but is now at "
+                   f"{current_gap_pct:.2f}% vs prior close (need {strat['min_gap_pct']}-{strat['max_gap_pct']}%) - "
+                   f"the move has faded or reversed since the scan, skipping rather than buying stale momentum.")
+            return
+
     qty = risk.position_size(equity, price, rules)
     if qty <= 0:
         db.log("INFO", "executor",

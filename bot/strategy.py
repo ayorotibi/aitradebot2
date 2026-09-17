@@ -21,11 +21,21 @@ def evaluate_gap_momentum(candidate: dict, rules: dict) -> dict:
     """A candidate that has already passed the premarket gap filter is a
     'buy' if the gap is positive (gap-up momentum), 'sell short' if the
     strategy config allows shorts (not enabled by default in this
-    baseline), otherwise 'hold'."""
+    baseline), otherwise 'hold'.
+
+    The candidate list this runs against was built once, at the premarket
+    scan - but on_trading_cycle() re-evaluates it every 5 minutes for the
+    rest of the day, so a BUY decided here might not execute until hours
+    later, well after that morning's gap has faded or reversed. This
+    function can't fix that by itself (it has no live price to check
+    against), so it passes prev_close/scan_gap_pct through on the signal -
+    execute_signal() in bot/executor.py uses these to re-confirm the gap
+    is still real, against a live price, right before actually buying."""
     gap_pct = candidate["gap_pct"]
     if gap_pct > 0:
         return {"symbol": candidate["symbol"], "action": "BUY",
-                "reason": f"Gap up {gap_pct:.2f}% vs prior close"}
+                "reason": f"Gap up {gap_pct:.2f}% vs prior close",
+                "prev_close": candidate["prev_close"], "scan_gap_pct": gap_pct}
     return {"symbol": candidate["symbol"], "action": "HOLD",
             "reason": f"Gap down {gap_pct:.2f}% - shorting disabled in baseline rules"}
 

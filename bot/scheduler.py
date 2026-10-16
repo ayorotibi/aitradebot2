@@ -58,11 +58,14 @@ class DailyJobTracker:
 
 
 def run_loop(rules_provider, on_premarket_scan, on_trading_cycle, on_eod_summary,
-             sleep_fn, poll_seconds: int = 15):
+             sleep_fn, poll_seconds: int = 15, on_time_exit=None):
     """
     rules_provider: () -> dict, called every iteration so dashboard edits
         take effect without a bot restart.
-    on_*: callables invoked at the right time.
+    on_*: callables invoked at the right time. on_time_exit is optional
+        (keyword-only, defaults to None) so existing callers that don't
+        pass it keep working unchanged - when omitted, the time-based
+        exit job is simply never run.
     sleep_fn: called between polls - plain time.sleep for a REST-based
         broker client like Alpaca's.
     """
@@ -80,6 +83,7 @@ def run_loop(rules_provider, on_premarket_scan, on_trading_cycle, on_eod_summary
         eod_h, eod_m = _parse_hhmm(sched["eod_summary_time"])
         window_start_h, window_start_m = _parse_hhmm(sched["trading_window_start"])
         window_end_h, window_end_m = _parse_hhmm(sched["trading_window_end"])
+        time_exit_h, time_exit_m = _parse_hhmm(sched.get("time_exit_time", "15:50"))
 
         # Weekdays only.
         if now.weekday() < 5:
@@ -99,6 +103,19 @@ def run_loop(rules_provider, on_premarket_scan, on_trading_cycle, on_eod_summary
                     except Exception:
                         logger.exception("trading cycle job failed")
                     last_cycle_run = now
+
+            # Runs once per day, ahead of the EOD summary (time_exit_time
+            # should be set earlier than eod_summary_time) so that by the
+            # time the EOD summary logs/notifies, any flatten this triggered
+            # has already happened.
+            if (on_time_exit is not None and sched.get("time_exit_enabled", True)
+                    and (now.hour, now.minute) >= (time_exit_h, time_exit_m)
+                    and tracker.should_run_once("time_exit", today)):
+                try:
+                    on_time_exit(rules)
+                except Exception:
+                    logger.exception("time-based exit job failed")
+                tracker.mark_run("time_exit", today)
 
             if (now.hour, now.minute) >= (eod_h, eod_m) and tracker.should_run_once("eod", today):
                 try:

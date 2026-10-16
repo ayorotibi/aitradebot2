@@ -50,6 +50,11 @@ def execute_signal(alpaca, rules: dict, signal: dict):
                f"rules.mode='live' but ALLOW_LIVE_TRADING is not set in the environment - "
                f"{symbol} will be traded on the PAPER account instead. This is an intentional double gate.")
 
+    if not risk.under_daily_trade_limit(rules):
+        db.log("INFO", "executor",
+               f"Max trades per day ({rules['risk'].get('max_trades_per_day')}) already reached - skipping {symbol}")
+        return
+
     our_positions = {p["symbol"] for p in db.get_open_positions()}
     if symbol in our_positions:
         db.log("INFO", "executor",
@@ -106,13 +111,16 @@ def execute_signal(alpaca, rules: dict, signal: dict):
                    f"the move has faded or reversed since the scan, skipping rather than buying stale momentum.")
             return
 
-    qty = risk.position_size(equity, price, rules)
+    # Stop/target prices are computed before sizing (not after, as before)
+    # because risk-based sizing (rules["risk"]["sizing_method"]) needs the
+    # stop distance to decide the share count - see bot/risk.py.
+    stop_loss, take_profit = risk.stop_and_target_prices(price, "BUY", rules)
+    qty = risk.position_size(equity, price, rules, stop_loss_price=stop_loss)
     if qty <= 0:
         db.log("INFO", "executor",
                f"Computed position size for {symbol} was 0 (check capital_allocation_usd headroom) - skipping")
         return
 
-    stop_loss, take_profit = risk.stop_and_target_prices(price, "BUY", rules)
     order_id = _client_order_id(symbol)
 
     try:

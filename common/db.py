@@ -10,7 +10,7 @@ nothing above this module (bot/*.py, dashboard/*.py) needed to change.
 """
 import json
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import psycopg2
 import psycopg2.pool
@@ -209,6 +209,54 @@ def get_today_pnl() -> float:
             )
             row = cur.fetchone()
             return float(row["total"]) if row else 0.0
+
+
+def get_week_pnl() -> float:
+    """Sum of realized PnL since this calendar week's Monday 00:00 UTC -
+    used by risk.check_weekly_loss_kill_switch()."""
+    today = datetime.now(timezone.utc).date()
+    monday = today - timedelta(days=today.weekday())
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COALESCE(SUM(pnl), 0) AS total FROM trades WHERE ts >= %s",
+                (monday.isoformat(),),
+            )
+            row = cur.fetchone()
+            return float(row["total"]) if row else 0.0
+
+
+def get_today_trade_count(side: str = None) -> int:
+    """Used by risk.under_daily_trade_limit(). Counts rows in `trades`
+    (one per executed/attempted order, not per signal) with a timestamp
+    today in UTC, optionally restricted to one side (e.g. "BUY" so a
+    bracket-exit SELL reconciliation doesn't count against the limit)."""
+    today = datetime.now(timezone.utc).date().isoformat()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            if side:
+                cur.execute(
+                    "SELECT COUNT(*) AS n FROM trades WHERE ts LIKE %s AND side = %s",
+                    (f"{today}%", side),
+                )
+            else:
+                cur.execute("SELECT COUNT(*) AS n FROM trades WHERE ts LIKE %s", (f"{today}%",))
+            row = cur.fetchone()
+            return int(row["n"]) if row else 0
+
+
+def get_recent_closed_trade_pnls(limit: int = 20):
+    """The most recent closed trades' realized PnL, newest first (only
+    trades where a pnl value was actually recorded - see
+    executor.reconcile_positions). Used by
+    risk.check_consecutive_loss_pause() to detect a losing streak."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT pnl FROM trades WHERE pnl IS NOT NULL ORDER BY id DESC LIMIT %s",
+                (limit,),
+            )
+            return [float(r["pnl"]) for r in cur.fetchall()]
 
 
 # --- Positions ---

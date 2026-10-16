@@ -117,6 +117,13 @@
           <div class="field"><label>Cycle interval (minutes)</label><input type="number" id="sched-interval" min="1"></div>
           <div class="field"><label>Timezone</label><input type="text" id="sched-tz"></div>
         </div>
+        <div class="toggle-row" style="margin-top:12px">
+          <label>Time-based exit (flatten all positions before close)</label>
+          <label class="switch"><input type="checkbox" id="sched-time-exit-enabled"><span class="slider"></span></label>
+        </div>
+        <div class="rules-grid">
+          <div class="field"><label>Flatten-all time</label><input type="time" id="sched-time-exit-time"></div>
+        </div>
       </div>
 
       <div class="panel">
@@ -153,12 +160,27 @@
           (not recommended while another strategy trades the same account).</p>
         <div class="rules-grid">
           <div class="field"><label>Capital allocation ($, blank = full equity)</label><input type="number" step="1" id="risk-allocation" placeholder="e.g. 10000"></div>
-          <div class="field"><label>Position size (% of allocation)</label><input type="number" step="0.1" id="risk-size"></div>
+          <div class="field">
+            <label>Sizing method</label>
+            <select id="risk-sizing-method" class="btn secondary" style="width:100%">
+              <option value="risk_based">Risk-based (recommended)</option>
+              <option value="fixed_dollar">Fixed dollar (legacy)</option>
+            </select>
+          </div>
+          <div class="field"><label>Risk per trade % (risk-based method)</label><input type="number" step="0.1" id="risk-per-trade"></div>
+          <div class="field"><label>Position size % (fixed-dollar method)</label><input type="number" step="0.1" id="risk-size"></div>
+          <div class="field"><label>Max position % of allocation (safety cap)</label><input type="number" step="0.1" id="risk-max-pos-pct"></div>
           <div class="field"><label>Max open positions</label><input type="number" id="risk-maxpos"></div>
+          <div class="field"><label>Max trades per day (blank = no limit)</label><input type="number" id="risk-max-trades-day"></div>
           <div class="field"><label>Stop loss %</label><input type="number" step="0.1" id="risk-sl"></div>
           <div class="field"><label>Take profit %</label><input type="number" step="0.1" id="risk-tp"></div>
           <div class="field"><label>Max daily loss % (auto kill switch)</label><input type="number" step="0.1" id="risk-maxloss"></div>
+          <div class="field"><label>Weekly loss limit % (auto kill switch)</label><input type="number" step="0.1" id="risk-weekly-loss"></div>
+          <div class="field"><label>Pause after N losses in a row (auto kill switch)</label><input type="number" id="risk-consec-loss"></div>
         </div>
+        <p class="muted" style="margin-top:8px">The daily loss, weekly loss, and consecutive-loss limits all engage the
+          same kill switch above and do <strong>not</strong> clear themselves - after one trips, trading stays paused
+          until you toggle the kill switch off here. Max trades per day is different: it resets on its own every day.</p>
       </div>
 
       <div class="panel">

@@ -32,11 +32,47 @@ def capital_headroom(rules: dict, equity: float) -> float:
     return max(base - deployed, 0.0)
 
 
-def position_size(equity: float, price: float, rules: dict) -> int:
+def position_size(equity: float, price: float, rules: dict, stop_loss_price: float = None) -> int:
+    """Two sizing methods, chosen by rules["risk"]["sizing_method"]:
+
+    "risk_based" (recommended, the default): size the trade so that if the
+    stop-loss actually fills, the dollar loss equals risk_per_trade_pct of
+    allocated capital - regardless of how far away this particular stock's
+    stop happens to be. A stock with a wide stop_distance gets a smaller
+    share count than one with a tight stop_distance, for the same dollar
+    risk. This needs stop_loss_price; callers should compute the stop
+    price first and pass it in. Falls back to the fixed-dollar method
+    below if stop_loss_price isn't supplied (e.g. an old caller) or the
+    stop distance is zero.
+
+    "fixed_dollar" (legacy): always spend position_size_pct of allocated
+    capital, with no reference to the stop distance at all - this is what
+    this function did before risk-based sizing was added, kept as an
+    option since it's simpler to reason about.
+
+    Either way, max_position_pct is then applied as a hard ceiling - a
+    tight stop relative to risk_per_trade_pct can otherwise call for an
+    outsized position, and this caps that regardless of which method ran."""
     if price <= 0 or equity <= 0:
         return 0
     base = allocated_capital_base(equity, rules)
-    dollar_size = base * (rules["risk"]["position_size_pct"] / 100.0)
+    risk_cfg = rules["risk"]
+    method = risk_cfg.get("sizing_method", "risk_based")
+
+    dollar_size = None
+    if method == "risk_based" and stop_loss_price:
+        stop_distance = abs(price - stop_loss_price)
+        if stop_distance > 0:
+            risk_amount = base * (risk_cfg.get("risk_per_trade_pct", 1.0) / 100.0)
+            dollar_size = (risk_amount / stop_distance) * price
+
+    if dollar_size is None:
+        dollar_size = base * (risk_cfg["position_size_pct"] / 100.0)
+
+    max_position_pct = risk_cfg.get("max_position_pct")
+    if max_position_pct:
+        dollar_size = min(dollar_size, base * (max_position_pct / 100.0))
+
     dollar_size = min(dollar_size, capital_headroom(rules, equity))
     qty = int(dollar_size // price)
     return max(qty, 0)
@@ -107,3 +143,76 @@ def check_daily_loss_kill_switch(rules: dict) -> bool:
                f"max_daily_loss_pct={max_loss_pct}% - kill switch engaged automatically")
         return True
     return False
+
+
+def check_weekly_loss_kill_switch(rules: dict) -> bool:
+    """Same pattern as check_daily_loss_kill_switch(), but measured against
+    this calendar week's (Mon-Sun, UTC) total realized PnL instead of just
+    today's - catches a slow bleed of small daily losses that each stay
+    under max_daily_loss_pct but add up to a bad week. Like the daily
+    version, this trips the SAME kill_switch flag, which this codebase only
+    ever clears manually from the dashboard - there is no automatic
+    reset, for either breaker, at the start of a new day or week."""
+    if rules.get("kill_switch"):
+        return False
+
+    max_loss_pct = rules["risk"].get("weekly_loss_limit_pct")
+    if not max_loss_pct:
+        return False
+
+    snapshot = db.get_latest_snapshot()
+    if not snapshot or not snapshot.get("equity"):
+        return False
+
+    week_pnl = db.get_week_pnl()
+    base = allocated_capital_base(snapshot["equity"], rules)
+
+    if base > 0 and week_pnl < 0 and abs(week_pnl) / base * 100.0 >= max_loss_pct:
+        rules["kill_switch"] = True
+        db.set_rules(rules)
+        db.log("WARNING", "risk",
+               f"This week's realized loss {week_pnl:.2f} ({abs(week_pnl)/base*100:.2f}% of allocated "
+               f"capital) hit weekly_loss_limit_pct={max_loss_pct}% - kill switch engaged automatically. "
+               f"This does not clear on its own - toggle it off from the dashboard once you're ready to "
+               f"resume trading.")
+        return True
+    return False
+
+
+def check_consecutive_loss_pause(rules: dict) -> bool:
+    """Trips the kill switch after N losing trades in a row (the most
+    recent N closed trades, by exit order, all with negative realized
+    PnL) - a streak that often means the strategy is mismatched to current
+    conditions for the day, even if no single loss or daily/weekly total
+    has crossed its own limit yet. Same manual-reset caveat as the other
+    two kill-switch breakers above."""
+    if rules.get("kill_switch"):
+        return False
+
+    pause_count = rules["risk"].get("consecutive_loss_pause_count")
+    if not pause_count or pause_count <= 0:
+        return False
+
+    recent = db.get_recent_closed_trade_pnls(limit=pause_count)
+    if len(recent) < pause_count:
+        return False  # not enough closed trades yet to judge a streak
+
+    if all(p < 0 for p in recent):
+        rules["kill_switch"] = True
+        db.set_rules(rules)
+        db.log("WARNING", "risk",
+               f"{pause_count} consecutive losing trades detected - kill switch engaged automatically "
+               f"to pause trading for a cool-down. This does not clear on its own - toggle it off from "
+               f"the dashboard once you're ready to resume trading.")
+        return True
+    return False
+
+
+def under_daily_trade_limit(rules: dict) -> bool:
+    """Unlike the three breakers above, this one needs no manual reset: it
+    counts today's trades fresh each time, so it naturally opens back up
+    at midnight UTC without anyone touching the dashboard."""
+    limit = rules["risk"].get("max_trades_per_day")
+    if not limit or limit <= 0:
+        return True
+    return db.get_today_trade_count(side="BUY") < limit

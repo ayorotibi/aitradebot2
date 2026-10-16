@@ -240,6 +240,8 @@ function ruleFieldMap(rules) {
     "#sched-eod": rules.schedule.eod_summary_time,
     "#sched-interval": rules.schedule.cycle_interval_minutes,
     "#sched-tz": rules.schedule.timezone,
+    "#sched-time-exit-enabled": rules.schedule.time_exit_enabled,
+    "#sched-time-exit-time": rules.schedule.time_exit_time,
     "#gm-enabled": rules.strategies.gap_momentum.enabled,
     "#gm-min-gap": rules.strategies.gap_momentum.min_gap_pct,
     "#gm-max-gap": rules.strategies.gap_momentum.max_gap_pct,
@@ -250,11 +252,17 @@ function ruleFieldMap(rules) {
     "#bo-lookback": rules.strategies.breakout.lookback_days,
     "#bo-pct": rules.strategies.breakout.breakout_pct,
     "#risk-allocation": rules.risk.capital_allocation_usd,
+    "#risk-sizing-method": rules.risk.sizing_method,
+    "#risk-per-trade": rules.risk.risk_per_trade_pct,
     "#risk-size": rules.risk.position_size_pct,
+    "#risk-max-pos-pct": rules.risk.max_position_pct,
     "#risk-maxpos": rules.risk.max_open_positions,
+    "#risk-max-trades-day": rules.risk.max_trades_per_day,
     "#risk-sl": rules.risk.stop_loss_pct,
     "#risk-tp": rules.risk.take_profit_pct,
     "#risk-maxloss": rules.risk.max_daily_loss_pct,
+    "#risk-weekly-loss": rules.risk.weekly_loss_limit_pct,
+    "#risk-consec-loss": rules.risk.consecutive_loss_pause_count,
     "#notif-telegram": rules.notifications.telegram_enabled,
     "#notif-trade": rules.notifications.notify_on_trade,
     "#notif-error": rules.notifications.notify_on_error,
@@ -285,6 +293,8 @@ function collectRulesFromForm() {
   r.schedule.eod_summary_time = $("#sched-eod").value;
   r.schedule.cycle_interval_minutes = Number($("#sched-interval").value);
   r.schedule.timezone = $("#sched-tz").value;
+  r.schedule.time_exit_enabled = $("#sched-time-exit-enabled").checked;
+  r.schedule.time_exit_time = $("#sched-time-exit-time").value;
   r.strategies.gap_momentum.enabled = $("#gm-enabled").checked;
   r.strategies.gap_momentum.min_gap_pct = Number($("#gm-min-gap").value);
   r.strategies.gap_momentum.max_gap_pct = Number($("#gm-max-gap").value);
@@ -296,11 +306,20 @@ function collectRulesFromForm() {
   r.strategies.breakout.breakout_pct = Number($("#bo-pct").value);
   const allocationRaw = $("#risk-allocation").value;
   r.risk.capital_allocation_usd = allocationRaw === "" ? null : Number(allocationRaw);
+  r.risk.sizing_method = $("#risk-sizing-method").value;
+  r.risk.risk_per_trade_pct = Number($("#risk-per-trade").value);
   r.risk.position_size_pct = Number($("#risk-size").value);
+  r.risk.max_position_pct = Number($("#risk-max-pos-pct").value);
   r.risk.max_open_positions = Number($("#risk-maxpos").value);
+  const maxTradesRaw = $("#risk-max-trades-day").value;
+  r.risk.max_trades_per_day = maxTradesRaw === "" ? null : Number(maxTradesRaw);
   r.risk.stop_loss_pct = Number($("#risk-sl").value);
   r.risk.take_profit_pct = Number($("#risk-tp").value);
   r.risk.max_daily_loss_pct = Number($("#risk-maxloss").value);
+  const weeklyLossRaw = $("#risk-weekly-loss").value;
+  r.risk.weekly_loss_limit_pct = weeklyLossRaw === "" ? null : Number(weeklyLossRaw);
+  const consecLossRaw = $("#risk-consec-loss").value;
+  r.risk.consecutive_loss_pause_count = consecLossRaw === "" ? null : Number(consecLossRaw);
   r.notifications.telegram_enabled = $("#notif-telegram").checked;
   r.notifications.notify_on_trade = $("#notif-trade").checked;
   r.notifications.notify_on_error = $("#notif-error").checked;

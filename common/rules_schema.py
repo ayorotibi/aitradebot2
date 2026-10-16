@@ -19,6 +19,9 @@ DEFAULT_RULES = {
         "premarket_scan_time": "08:00",
         "trading_window_start": "09:35",
         "trading_window_end": "15:55",
+        "time_exit_enabled": True,     # flatten every open position once per day at time_exit_time,
+                                        # so nothing is held overnight into unknown pre/after-market moves
+        "time_exit_time": "15:50",
         "eod_summary_time": "16:15",
         "cycle_interval_minutes": 5,
     },
@@ -42,11 +45,31 @@ DEFAULT_RULES = {
     },
 
     "risk": {
-        "position_size_pct": 2.0,     # % of this bot's allocated capital per new position (see capital_allocation_usd)
+        "sizing_method": "risk_based",   # "risk_based" (recommended): size each trade so that actually
+                                          # hitting the stop-loss loses exactly risk_per_trade_pct of
+                                          # allocated capital, regardless of this stock's stop distance.
+                                          # "fixed_dollar" (legacy): always spend position_size_pct of
+                                          # allocated capital, with no reference to the stop distance.
+        "risk_per_trade_pct": 1.0,       # used when sizing_method="risk_based" - % of allocated capital
+                                          # you're willing to lose on this one trade if the stop fills.
+        "max_position_pct": 20.0,        # safety ceiling that applies under EITHER sizing method: never
+                                          # put more than this % of allocated capital into a single
+                                          # position, even if risk-based math (a tight stop relative to
+                                          # risk_per_trade_pct) would otherwise call for more.
+        "position_size_pct": 2.0,     # % of this bot's allocated capital per new position - used when
+                                       # sizing_method="fixed_dollar" (see capital_allocation_usd)
         "max_open_positions": 5,
+        "max_trades_per_day": 10,     # blank/0 = no daily trade-count limit. Resets automatically at
+                                       # midnight UTC since it's computed from today's trade count, not
+                                       # a flag - no manual reset needed.
         "stop_loss_pct": 3.0,
         "take_profit_pct": 6.0,
         "max_daily_loss_pct": 5.0,    # trips kill_switch automatically for the rest of the day
+        "weekly_loss_limit_pct": 10.0,   # blank/0 = disabled. Trips kill_switch automatically, same as
+                                          # max_daily_loss_pct, when this week's realized PnL (Mon-Sun,
+                                          # UTC) drops below -this% of allocated capital.
+        "consecutive_loss_pause_count": 3,  # blank/0 = disabled. Trips kill_switch automatically after
+                                             # this many losing trades in a row (most recent closed trades).
         "capital_allocation_usd": None,  # cap on total $ this bot will deploy at once, since the
                                           # Alpaca account is shared with another bot/strategy.
                                           # null = use the full account equity (not recommended

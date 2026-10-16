@@ -13,7 +13,7 @@ from common.config import Config
 from bot.alpaca_client import AlpacaClient
 from bot.scanner import run_premarket_scan
 from bot.strategy import evaluate_gap_momentum, evaluate_breakout
-from bot.executor import execute_signal, reconcile_positions
+from bot.executor import execute_signal, reconcile_positions, flatten_all
 from bot import notifier, risk, scheduler
 
 logging.basicConfig(
@@ -69,6 +69,10 @@ def on_trading_cycle(rules: dict):
 
     if risk.check_daily_loss_kill_switch(rules):
         return  # kill switch just tripped this cycle; don't also trade
+    if risk.check_weekly_loss_kill_switch(rules):
+        return
+    if risk.check_consecutive_loss_pause(rules):
+        return
 
     account = alpaca.account_summary()
     equity = account.get("NetLiquidation")
@@ -89,6 +93,29 @@ def on_trading_cycle(rules: dict):
             signal = evaluate_breakout(candidate["symbol"], rules)
             if signal["action"] == "BUY":
                 execute_signal(alpaca, rules, signal)
+
+
+def on_time_exit(rules: dict):
+    """Runs once per trading day, at rules["schedule"]["time_exit_time"]
+    (default 15:50 ET, ahead of the 15:55 trading-window close and 16:15 EOD
+    summary) - flattens every position this bot holds so nothing is carried
+    overnight into a gap the next morning's premarket scan would otherwise
+    have to react to after the fact. Reuses the same flatten_all() the
+    dashboard's manual kill-switch flatten uses; it only ever touches
+    positions this bot opened, never the other strategy's, same as always."""
+    if not rules["schedule"].get("time_exit_enabled", True):
+        return
+    positions = db.get_open_positions()
+    if not positions:
+        db.log("INFO", "main", "Time-based exit check: no open positions to flatten")
+        return
+    alpaca = get_client(rules)
+    db.log("WARNING", "main",
+           f"Time-based exit triggered ({rules['schedule'].get('time_exit_time')}) - "
+           f"flattening {len(positions)} open position(s) to avoid holding overnight")
+    flatten_all(alpaca, "Scheduled time-based exit - avoiding overnight/gap risk")
+    if rules["notifications"]["notify_on_trade"]:
+        notifier.send(f"⏰ Time-based exit: flattened {len(positions)} position(s) before close")
 
 
 def on_eod_summary(rules: dict):
@@ -118,5 +145,6 @@ if __name__ == "__main__":
         on_premarket_scan=on_premarket_scan,
         on_trading_cycle=on_trading_cycle,
         on_eod_summary=on_eod_summary,
+        on_time_exit=on_time_exit,
         sleep_fn=time.sleep,
     )

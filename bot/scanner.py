@@ -28,9 +28,16 @@ def run_premarket_scan(rules: dict) -> list:
     passed = []
 
     for _, row in df.iterrows():
+        # NOTE: deliberately NOT abs(row["gap_pct"]) - bot/strategy.py's
+        # evaluate_gap_momentum() only ever issues a BUY for a positive gap
+        # (shorting is disabled in the baseline rules), so a gap-DOWN of
+        # sufficient magnitude must never be marked "passed" here even
+        # though its magnitude clears min_gap_pct - the strategy can never
+        # actually act on it, and showing it as PASSED on the Scans tab was
+        # misleading about what the bot would do with it.
         ok = (
             strat["min_price"] <= row["last_price"] <= strat["max_price"]
-            and strat["min_gap_pct"] <= abs(row["gap_pct"]) <= strat["max_gap_pct"]
+            and strat["min_gap_pct"] <= row["gap_pct"] <= strat["max_gap_pct"]
             and row["volume"] >= strat["min_avg_volume"]
         )
         notes = "passed all filters" if ok else "filtered out"

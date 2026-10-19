@@ -233,3 +233,38 @@ class AlpacaClient:
             client_order_id=client_order_id,
         )
         return self.trading.submit_order(order_request)
+
+    def cancel_open_orders_for_symbol(self, symbol: str):
+        """Cancels every open order Alpaca has resting for `symbol`. Used by
+        flatten_all() right before its closing SELL: every position this
+        bot opens carries a live GTC bracket order (its stop-loss/take-
+        profit legs), which claims the position's ENTIRE share count as
+        "held for orders" at Alpaca for as long as it rests - that's the
+        whole point of a protective order. Submitting a separate flatten
+        SELL on top of that is rejected ("insufficient qty available",
+        available: 0), because Alpaca won't let two different orders both
+        claim the same shares - this is what actually happened the first
+        evening the scheduled time-based exit ran against positions that
+        were still bracketed.
+
+        Safe to cancel by symbol with no ownership filtering of individual
+        orders here, because flatten_all() only calls this after
+        _symbol_conflicts_with_other_bot() has already confirmed this bot
+        solely owns whatever position Alpaca shows for this symbol - so
+        any open order found for it is this bot's own. (A client_order_id
+        tag filter was considered instead, but bracket/OCO exit legs don't
+        reliably carry a matching tag once the entry fills - see
+        has_live_protective_orders()'s own note on exactly this - so this
+        leans on the ownership check at the call site rather than an
+        unreliable tag match here.)"""
+        try:
+            req = GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol], limit=20, nested=True)
+            orders = self.trading.get_orders(req)
+        except Exception as exc:
+            logger.warning("Could not fetch open orders for %s before flatten: %s", symbol, exc)
+            return
+        for o in orders:
+            try:
+                self.trading.cancel_order_by_id(o.id)
+            except Exception as exc:
+                logger.warning("Could not cancel resting order %s for %s before flatten: %s", o.id, symbol, exc)

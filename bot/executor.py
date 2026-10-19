@@ -240,15 +240,52 @@ def _rearm_unprotected(alpaca, rules: dict, pos: dict):
 
 def flatten_all(alpaca, reason: str):
     """Used by the dashboard's kill-switch endpoint for an immediate,
-    manual flatten of every position THIS BOT opened - never the other
-    bot's positions, even in the same symbol."""
+    manual flatten, and by bot/main.py's scheduled time-based exit, to
+    close every position THIS BOT opened - never the other bot's
+    positions, even in the same symbol.
+
+    Every position this bot opens carries a live GTC bracket order, which
+    claims the ENTIRE share count as "held for orders" at Alpaca for as
+    long as it rests there. A plain flatten SELL submitted on top of that
+    is rejected ("insufficient qty available", available: 0) - first
+    surfaced when the scheduled time-based exit flattened one position
+    fine but failed on four others still protected by a live bracket the
+    same evening. So each symbol's own resting orders are cancelled first
+    (freeing the shares), with a short pause for Alpaca to register the
+    cancellation, before the flatten SELL is submitted.
+
+    Before cancelling a symbol's resting orders, this checks that Alpaca's
+    own broker-side quantity for that symbol exactly matches what this
+    bot's own records show. If it doesn't - or Alpaca shows no position
+    there at all, e.g. something else (reconciliation) beat this to it -
+    that means either this bot's tracking has drifted or the other
+    strategy sharing this account also holds shares in that same symbol,
+    and cancelling "every open order for this symbol" could touch an
+    order that isn't ours. Either way this skips the symbol and logs it
+    for a manual look, rather than risk that. (The existence-only check
+    used elsewhere in this file, _symbol_conflicts_with_other_bot(), only
+    catches a symbol this bot doesn't track at all - every symbol reached
+    here already IS tracked, since this loop iterates
+    db.get_open_positions(), so that check alone would never fire here -
+    hence the quantity comparison instead.)"""
     positions = db.get_open_positions()
     for pos in positions:
+        symbol = pos["symbol"]
+        broker_pos = alpaca.broker_position_for_symbol(symbol)
+        if broker_pos is None or abs(broker_pos["qty"] - pos["qty"]) > 1e-6:
+            db.log("ERROR", "executor",
+                   f"Could not flatten {symbol} ({reason}): Alpaca's broker-side quantity "
+                   f"({broker_pos['qty'] if broker_pos else 'none'}) doesn't match this bot's tracked "
+                   f"quantity ({pos['qty']}) - skipping rather than risk cancelling an order that might "
+                   f"not be ours. This needs a manual look.")
+            continue
         try:
-            order_id = _client_order_id(pos["symbol"])
-            alpaca.close_tracked_position(pos["symbol"], pos["qty"], order_id)
-            db.record_trade(pos["symbol"], "SELL", pos["qty"], None, "MARKET", "SUBMITTED", reason)
-            db.remove_position(pos["symbol"])
-            db.log("WARNING", "executor", f"Flattened {pos['symbol']} ({reason})")
+            alpaca.cancel_open_orders_for_symbol(symbol)
+            time.sleep(0.5)  # give Alpaca a moment to release the shares the cancelled order was holding
+            order_id = _client_order_id(symbol)
+            alpaca.close_tracked_position(symbol, pos["qty"], order_id)
+            db.record_trade(symbol, "SELL", pos["qty"], None, "MARKET", "SUBMITTED", reason)
+            db.remove_position(symbol)
+            db.log("WARNING", "executor", f"Flattened {symbol} ({reason})")
         except Exception as exc:
-            db.log("ERROR", "executor", f"Failed to flatten {pos['symbol']}: {exc}")
+            db.log("ERROR", "executor", f"Failed to flatten {symbol}: {exc}")

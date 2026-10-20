@@ -117,6 +117,34 @@ def under_day_trade_limit(account: dict) -> bool:
     return account.get("DayTradeCount", 0) < PDT_DAY_TRADE_LIMIT
 
 
+def _breaker_marker_key(name: str) -> str:
+    return f"_{name}_breaker_last_seen_trade_id"
+
+
+def _should_skip_breaker_reeval(rules: dict, name: str, latest_trade_id) -> bool:
+    """True if this breaker already evaluated against the current most
+    recently closed trade, i.e. nothing NEW has closed since.
+
+    Without this, clearing the kill switch from the dashboard would get
+    immediately undone on the very next cycle: daily loss, weekly loss,
+    and the consecutive-loss streak are all derived from the trades
+    table, so none of them change at all between one trade closing and
+    the next - re-running the same check against the same unchanged
+    numbers just re-detects the exact same already-acted-on condition and
+    re-trips the switch before a new trade even gets a chance to run. (This
+    is the actual cause of "the kill switch always forces to ON" - it
+    looked like a stuck toggle, but it was this check correctly, if
+    unhelpfully, re-confirming an unchanged loss streak over and over.)
+
+    Each breaker tracks its own marker (keyed by `name`), stored directly
+    on the rules dict next to kill_switch itself (the same place that flag
+    already lives), so the three breakers stay independent of one another
+    and the marker survives a restart."""
+    if latest_trade_id is None:
+        return False  # nothing has closed yet at all - always evaluate
+    return rules.get(_breaker_marker_key(name)) == latest_trade_id
+
+
 def check_daily_loss_kill_switch(rules: dict) -> bool:
     """Returns True if the kill switch was just tripped by today's losses.
     Also persists the change to the rules row so the dashboard reflects it
@@ -128,6 +156,10 @@ def check_daily_loss_kill_switch(rules: dict) -> bool:
     if not snapshot or not snapshot.get("equity"):
         return False
 
+    latest_trade_id = db.get_latest_closed_trade_id()
+    if _should_skip_breaker_reeval(rules, "daily_loss", latest_trade_id):
+        return False
+
     daily_pnl = snapshot["daily_pnl"] or 0.0
     # Measured against this bot's allocated capital, not the whole shared
     # account's equity - a loss that's small relative to the full account
@@ -135,13 +167,16 @@ def check_daily_loss_kill_switch(rules: dict) -> bool:
     base = allocated_capital_base(snapshot["equity"], rules)
     max_loss_pct = rules["risk"]["max_daily_loss_pct"]
 
-    if base > 0 and daily_pnl < 0 and abs(daily_pnl) / base * 100.0 >= max_loss_pct:
+    tripped = base > 0 and daily_pnl < 0 and abs(daily_pnl) / base * 100.0 >= max_loss_pct
+    rules[_breaker_marker_key("daily_loss")] = latest_trade_id
+    if tripped:
         rules["kill_switch"] = True
         db.set_rules(rules)
         db.log("WARNING", "risk",
                f"Daily loss {daily_pnl:.2f} ({abs(daily_pnl)/base*100:.2f}% of allocated capital) hit "
                f"max_daily_loss_pct={max_loss_pct}% - kill switch engaged automatically")
         return True
+    db.set_rules(rules)  # persist the marker even when not tripped, so a later unchanged check is skipped
     return False
 
 
@@ -164,10 +199,16 @@ def check_weekly_loss_kill_switch(rules: dict) -> bool:
     if not snapshot or not snapshot.get("equity"):
         return False
 
+    latest_trade_id = db.get_latest_closed_trade_id()
+    if _should_skip_breaker_reeval(rules, "weekly_loss", latest_trade_id):
+        return False
+
     week_pnl = db.get_week_pnl()
     base = allocated_capital_base(snapshot["equity"], rules)
 
-    if base > 0 and week_pnl < 0 and abs(week_pnl) / base * 100.0 >= max_loss_pct:
+    tripped = base > 0 and week_pnl < 0 and abs(week_pnl) / base * 100.0 >= max_loss_pct
+    rules[_breaker_marker_key("weekly_loss")] = latest_trade_id
+    if tripped:
         rules["kill_switch"] = True
         db.set_rules(rules)
         db.log("WARNING", "risk",
@@ -176,6 +217,7 @@ def check_weekly_loss_kill_switch(rules: dict) -> bool:
                f"This does not clear on its own - toggle it off from the dashboard once you're ready to "
                f"resume trading.")
         return True
+    db.set_rules(rules)
     return False
 
 
@@ -197,7 +239,13 @@ def check_consecutive_loss_pause(rules: dict) -> bool:
     if len(recent) < pause_count:
         return False  # not enough closed trades yet to judge a streak
 
-    if all(p < 0 for p in recent):
+    latest_trade_id = db.get_latest_closed_trade_id()
+    if _should_skip_breaker_reeval(rules, "consecutive_loss", latest_trade_id):
+        return False
+
+    tripped = all(p < 0 for p in recent)
+    rules[_breaker_marker_key("consecutive_loss")] = latest_trade_id
+    if tripped:
         rules["kill_switch"] = True
         db.set_rules(rules)
         db.log("WARNING", "risk",
@@ -205,6 +253,7 @@ def check_consecutive_loss_pause(rules: dict) -> bool:
                f"to pause trading for a cool-down. This does not clear on its own - toggle it off from "
                f"the dashboard once you're ready to resume trading.")
         return True
+    db.set_rules(rules)
     return False
 
 

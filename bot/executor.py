@@ -267,7 +267,7 @@ def flatten_all(alpaca, reason: str):
     catches a symbol this bot doesn't track at all - every symbol reached
     here already IS tracked, since this loop iterates
     db.get_open_positions(), so that check alone would never fire here -
-    hence the quantity comparison instead.)"""
+    hence the quantity comparison here instead.)"""
     positions = db.get_open_positions()
     for pos in positions:
         symbol = pos["symbol"]
@@ -280,8 +280,33 @@ def flatten_all(alpaca, reason: str):
                    f"not be ours. This needs a manual look.")
             continue
         try:
-            alpaca.cancel_open_orders_for_symbol(symbol)
-            time.sleep(0.5)  # give Alpaca a moment to release the shares the cancelled order was holding
+            cancelled = alpaca.cancel_open_orders_for_symbol(symbol)
+            if cancelled < 0:
+                db.log("WARNING", "executor",
+                       f"{symbol}: could not look up its resting orders before flatten - attempting the "
+                       f"flatten SELL anyway, but it may fail with 'insufficient qty available' if an "
+                       f"order is still holding the shares.")
+            else:
+                db.log("INFO", "executor", f"{symbol}: cancelled {cancelled} resting order(s) before flatten")
+
+            # Give Alpaca a moment to register the cancellation(s) and
+            # release the shares, then confirm the shares actually freed up
+            # before attempting the sell - and retry the cancel once, with
+            # a longer pause, if they haven't. This directly targets a
+            # cancel-to-sell timing gap, one of the two live theories (the
+            # other being the orders lookup itself missing something) for
+            # why the first version of this fix still hit the same
+            # "insufficient qty available" error the very next trading day.
+            time.sleep(0.5)
+            broker_pos = alpaca.broker_position_for_symbol(symbol)
+            qty_available = broker_pos.get("qty_available") if broker_pos else None
+            if qty_available is not None and qty_available < pos["qty"] - 1e-6:
+                db.log("WARNING", "executor",
+                       f"{symbol}: shares still not available {qty_available}/{pos['qty']} after cancelling "
+                       f"and a 0.5s pause - retrying the cancel once with a longer pause before selling.")
+                alpaca.cancel_open_orders_for_symbol(symbol)
+                time.sleep(2.0)
+
             order_id = _client_order_id(symbol)
             alpaca.close_tracked_position(symbol, pos["qty"], order_id)
             db.record_trade(symbol, "SELL", pos["qty"], None, "MARKET", "SUBMITTED", reason)

@@ -259,6 +259,23 @@ def get_recent_closed_trade_pnls(limit: int = 20):
             return [float(r["pnl"]) for r in cur.fetchall()]
 
 
+def get_latest_closed_trade_id():
+    """The id of the most recently closed (pnl recorded) trade, or None if
+    none yet. Used by risk.py's three auto kill-switch breakers (daily
+    loss, weekly loss, consecutive-loss) to tell whether anything NEW has
+    closed since they last checked - all three are derived from this same
+    trades table, so none of them change at all between one trade closing
+    and the next. Without this, clearing the kill switch from the
+    dashboard mid-streak/mid-loss would get immediately undone on the very
+    next cycle, since re-running the same check against the same unchanged
+    numbers just re-detects the exact same already-acted-on condition."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM trades WHERE pnl IS NOT NULL ORDER BY id DESC LIMIT 1")
+            row = cur.fetchone()
+            return row["id"] if row else None
+
+
 # --- Positions ---
 
 def upsert_position(symbol, qty, avg_price, stop_loss=None, take_profit=None):

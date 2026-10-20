@@ -234,7 +234,7 @@ class AlpacaClient:
         )
         return self.trading.submit_order(order_request)
 
-    def cancel_open_orders_for_symbol(self, symbol: str):
+    def cancel_open_orders_for_symbol(self, symbol: str) -> int:
         """Cancels every open order Alpaca has resting for `symbol`. Used by
         flatten_all() right before its closing SELL: every position this
         bot opens carries a live GTC bracket order (its stop-loss/take-
@@ -248,23 +248,33 @@ class AlpacaClient:
         were still bracketed.
 
         Safe to cancel by symbol with no ownership filtering of individual
-        orders here, because flatten_all() only calls this after
-        _symbol_conflicts_with_other_bot() has already confirmed this bot
-        solely owns whatever position Alpaca shows for this symbol - so
-        any open order found for it is this bot's own. (A client_order_id
-        tag filter was considered instead, but bracket/OCO exit legs don't
-        reliably carry a matching tag once the entry fills - see
-        has_live_protective_orders()'s own note on exactly this - so this
-        leans on the ownership check at the call site rather than an
-        unreliable tag match here.)"""
+        orders here, because flatten_all() only calls this after confirming
+        Alpaca's broker-side quantity for this symbol exactly matches this
+        bot's own tracked quantity - so any open order found for it is this
+        bot's own. (A client_order_id tag filter was considered instead,
+        but bracket/OCO exit legs don't reliably carry a matching tag once
+        the entry fills - see has_live_protective_orders()'s own note on
+        exactly this - so this leans on the quantity check at the call
+        site rather than an unreliable tag match here.)
+
+        Returns how many orders it found and attempted to cancel, or -1 if
+        it couldn't even look them up. flatten_all() logs this count
+        through db.log() (the dashboard's Logs tab) rather than leaving it
+        in this method's own logger.warning() calls alone - those only
+        reach Render's raw service output, not the dashboard, which is
+        exactly why the first attempt at this fix left no visible trail
+        when flattening still failed afterward."""
         try:
             req = GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol], limit=20, nested=True)
             orders = self.trading.get_orders(req)
         except Exception as exc:
             logger.warning("Could not fetch open orders for %s before flatten: %s", symbol, exc)
-            return
+            return -1
+        cancelled = 0
         for o in orders:
             try:
                 self.trading.cancel_order_by_id(o.id)
+                cancelled += 1
             except Exception as exc:
                 logger.warning("Could not cancel resting order %s for %s before flatten: %s", o.id, symbol, exc)
+        return cancelled

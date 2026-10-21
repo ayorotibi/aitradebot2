@@ -263,7 +263,19 @@ class AlpacaClient:
         in this method's own logger.warning() calls alone - those only
         reach Render's raw service output, not the dashboard, which is
         exactly why the first attempt at this fix left no visible trail
-        when flattening still failed afterward."""
+        when flattening still failed afterward.
+
+        IMPORTANT: a filled bracket's resting stop-loss/take-profit pair
+        comes back from Alpaca as ONE order object whose actual sell
+        orders are nested under `.legs`, not as independent top-level
+        orders - has_live_protective_orders() above already had to learn
+        this the hard way. The first version of this method cancelled
+        only each top-level order's own id and missed the legs entirely:
+        it correctly reported "cancelled 1 order" every time, yet the
+        shares stayed locked, because that one order was the parent
+        wrapper, not the leg actually holding the claim. So every leg
+        found under each order is cancelled individually too, not just
+        the order itself."""
         try:
             req = GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol], limit=20, nested=True)
             orders = self.trading.get_orders(req)
@@ -272,9 +284,15 @@ class AlpacaClient:
             return -1
         cancelled = 0
         for o in orders:
-            try:
-                self.trading.cancel_order_by_id(o.id)
-                cancelled += 1
-            except Exception as exc:
-                logger.warning("Could not cancel resting order %s for %s before flatten: %s", o.id, symbol, exc)
+            targets = [o] + list(getattr(o, "legs", None) or [])
+            for target in targets:
+                order_id = getattr(target, "id", None)
+                if order_id is None:
+                    continue
+                try:
+                    self.trading.cancel_order_by_id(order_id)
+                    cancelled += 1
+                except Exception as exc:
+                    logger.warning("Could not cancel resting order %s for %s before flatten: %s",
+                                    order_id, symbol, exc)
         return cancelled

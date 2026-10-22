@@ -275,7 +275,21 @@ class AlpacaClient:
         shares stayed locked, because that one order was the parent
         wrapper, not the leg actually holding the claim. So every leg
         found under each order is cancelled individually too, not just
-        the order itself."""
+        the order itself.
+
+        IMPORTANT (round two): an OCO stop-loss/take-profit pair's two legs
+        each list the OTHER leg under their own `.legs` too - get_orders
+        returns both the stop order and the limit order as separate
+        top-level entries, and EACH one's `.legs` includes its sibling. The
+        loop below used to build `targets` per top-level order without
+        tracking what it had already seen, so the same real order id got a
+        second cancel_order_by_id() call within this same method call (once
+        as its own top-level entry, once as the other order's listed leg) -
+        Alpaca accepts the first and rejects the second with "order pending
+        cancel" (code 42210000). Harmless but noisy, and it was burning
+        through the retry window in flatten_all() for no benefit - so every
+        order id is now only ever cancelled once per call, even if it shows
+        up under more than one parent/leg relationship."""
         try:
             req = GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol], limit=20, nested=True)
             orders = self.trading.get_orders(req)
@@ -283,12 +297,14 @@ class AlpacaClient:
             logger.warning("Could not fetch open orders for %s before flatten: %s", symbol, exc)
             return -1
         cancelled = 0
+        seen_ids = set()
         for o in orders:
             targets = [o] + list(getattr(o, "legs", None) or [])
             for target in targets:
                 order_id = getattr(target, "id", None)
-                if order_id is None:
+                if order_id is None or order_id in seen_ids:
                     continue
+                seen_ids.add(order_id)
                 try:
                     self.trading.cancel_order_by_id(order_id)
                     cancelled += 1

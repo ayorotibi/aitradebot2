@@ -289,23 +289,32 @@ def flatten_all(alpaca, reason: str):
             else:
                 db.log("INFO", "executor", f"{symbol}: cancelled {cancelled} resting order(s) before flatten")
 
-            # Give Alpaca a moment to register the cancellation(s) and
-            # release the shares, then confirm the shares actually freed up
-            # before attempting the sell - and retry the cancel once, with
-            # a longer pause, if they haven't. This directly targets a
-            # cancel-to-sell timing gap, one of the two live theories (the
-            # other being the orders lookup itself missing something) for
-            # why the first version of this fix still hit the same
-            # "insufficient qty available" error the very next trading day.
-            time.sleep(0.5)
-            broker_pos = alpaca.broker_position_for_symbol(symbol)
-            qty_available = broker_pos.get("qty_available") if broker_pos else None
-            if qty_available is not None and qty_available < pos["qty"] - 1e-6:
+            # Cancelling an order only SUBMITS the cancel request -
+            # Alpaca's engine still needs time to actually process it and
+            # release the shares as "available" on the position. The
+            # previous version of this fix waited a fixed 0.5s, and if
+            # still locked, re-issued the SAME cancel requests again before
+            # waiting a further 2.0s - but re-submitting a cancel for an
+            # order that's already mid-cancellation just gets rejected
+            # ("order pending cancel") and doesn't speed anything up, and
+            # under 3 seconds total turned out not to be enough: production
+            # logs (Oct 21) showed PCG/MDT/MRNA/DVN all still locked after
+            # that whole sequence. So instead of guessing a pause and
+            # re-cancelling, this polls qty_available directly, waiting up
+            # to 15 seconds for Alpaca to actually finish releasing the
+            # shares before giving the sell a shot.
+            qty_available = None
+            for _ in range(15):
+                time.sleep(1.0)
+                broker_pos = alpaca.broker_position_for_symbol(symbol)
+                qty_available = broker_pos.get("qty_available") if broker_pos else None
+                if qty_available is not None and qty_available >= pos["qty"] - 1e-6:
+                    break
+            else:
                 db.log("WARNING", "executor",
-                       f"{symbol}: shares still not available {qty_available}/{pos['qty']} after cancelling "
-                       f"and a 0.5s pause - retrying the cancel once with a longer pause before selling.")
-                alpaca.cancel_open_orders_for_symbol(symbol)
-                time.sleep(2.0)
+                       f"{symbol}: shares still showing {qty_available}/{pos['qty']} available after "
+                       f"cancelling and waiting up to 15s - attempting the flatten SELL anyway, which may "
+                       f"fail with 'insufficient qty available' if Alpaca still hasn't released them.")
 
             order_id = _client_order_id(symbol)
             alpaca.close_tracked_position(symbol, pos["qty"], order_id)
